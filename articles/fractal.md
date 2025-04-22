@@ -93,7 +93,7 @@ The 2D scheme is practical to illustrate the concepts, but the Hilbert curve can
 
 ![][image-3d-hilbert-curve]
 
-[image-2d-asciiart]: .assets/2d/ascii
+[image-2d-asciiart]: .assets/2d/asciiart.png
 [image-2d-chunk]: .assets/2d/chunk.english.png
 [image-2d-split]: .assets/2d/split.english.png
 
