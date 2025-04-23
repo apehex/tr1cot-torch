@@ -12,7 +12,29 @@ As of 2025, there are [only 299,056 codepoints allocated][wiki-unicode] compared
 
 This means that the available codepoints are located on the lower end of the Unicode: most of the bits are null.
 
-In particular, the most significant byte is always zero: any Unicode character can be represented with only 3 byte.
+In particular, the most significant byte is always zero: any Unicode character can be represented with only 3 bytes.
+
+```python
+np.array(list('The Hilbert curve'.encode('utf-32-be'))).reshape((-1, 4))
+# array([[  0,   0,   0,  84],
+#        [  0,   0,   0, 104],
+#        [  0,   0,   0, 101],
+#        [  0,   0,   0,  32],
+#        [  0,   0,   0,  72],
+#        [  0,   0,   0, 105],
+#        [  0,   0,   0, 108],
+#        [  0,   0,   0,  98],
+#        [  0,   0,   0, 101],
+#        [  0,   0,   0, 114],
+#        [  0,   0,   0, 116],
+#        [  0,   0,   0,  32],
+#        [  0,   0,   0,  99],
+#        [  0,   0,   0, 117],
+#        [  0,   0,   0, 114],
+#        [  0,   0,   0, 118],
+#        [  0,   0,   0, 101]])
+```
+
 In turn, these 3 bytes can be interpreted as the RGB components of a color:
 
 ![][image-rgb-english]
@@ -20,14 +42,22 @@ In turn, these 3 bytes can be interpreted as the RGB components of a color:
 In the image above, each character is represented by a pixel.
 It is mostly blue because ASCII characters (western letters) are the smallest codepoints: the red and green channels are null.
 
-```python
-list('H'.encode('utf-32-be'))
-# [0, 0, 0, 72]
-```
-
 For example CJK characters cover a wider range of codepoints / colors:
 
+```python
+np.array(list('ヒルベルト曲線'.encode('utf-32-be'))).reshape((-1, 4))
+# array([[  0,   0,  48, 210],
+#        [  0,   0,  48, 235],
+#        [  0,   0,  48, 217],
+#        [  0,   0,  48, 235],
+#        [  0,   0,  48, 200],
+#        [  0,   0, 102, 242],
+#        [  0,   0, 125, 218]])
+```
+
 ![][image-rgb-japanese]
+
+For the rest of this article, text will be displayed both as characters and RGB pixels.
 
 ## 2D Text
 
@@ -93,6 +123,10 @@ The 2D scheme is practical to illustrate the concepts, but the Hilbert curve can
 
 ![][image-3d-hilbert-curve]
 
+Which allows to encode text as a hypercube of shape $(2\^{o})\^{n}$:
+
+![][image-3d-hilbert-rgb]
+
 [image-2d-asciiart]: .assets/2d/asciiart.png
 [image-2d-chunk]: .assets/2d/chunk.english.png
 [image-2d-split]: .assets/2d/split.english.png
@@ -101,6 +135,7 @@ The 2D scheme is practical to illustrate the concepts, but the Hilbert curve can
 [image-2d-hilbert-attention]: .assets/2d/hilbert.attention.png
 [image-2d-hilbert-zoom]: .assets/2d/hilbert.zoom.png
 [image-3d-hilbert-curve]: .assets/3d/curve.png
+[image-3d-hilbert-rgb]: .assets/3d/rgb.png
 
 [image-rgb-english]: .assets/rgb/english.png
 [image-rgb-japanese]: .assets/rgb/japanese.png
