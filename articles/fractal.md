@@ -15,24 +15,14 @@ This means that the available codepoints are located on the lower end of the Uni
 In particular, the most significant byte is always zero: any Unicode character can be represented with only 3 bytes.
 
 ```python
-np.array(list('The Hilbert curve'.encode('utf-32-be'))).reshape((-1, 4))
-# array([[  0,   0,   0,  84],
-#        [  0,   0,   0, 104],
-#        [  0,   0,   0, 101],
-#        [  0,   0,   0,  32],
-#        [  0,   0,   0,  72],
+np.array(list('Hilbert'.encode('utf-32-be'))).reshape((-1, 4))
+# array([[  0,   0,   0,  72],
 #        [  0,   0,   0, 105],
 #        [  0,   0,   0, 108],
 #        [  0,   0,   0,  98],
 #        [  0,   0,   0, 101],
 #        [  0,   0,   0, 114],
-#        [  0,   0,   0, 116],
-#        [  0,   0,   0,  32],
-#        [  0,   0,   0,  99],
-#        [  0,   0,   0, 117],
-#        [  0,   0,   0, 114],
-#        [  0,   0,   0, 118],
-#        [  0,   0,   0, 101]])
+#        [  0,   0,   0, 116]])
 ```
 
 In turn, these 3 bytes can be interpreted as the RGB components of a color:
