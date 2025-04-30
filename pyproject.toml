@@ -9,9 +9,10 @@ packages = [{include="tr1cot"}]
 
 [tool.poetry.dependencies]
 densecurves = ">=0.1"
-mlable = ">=0.18"
-python = ">=3.10,<4.0"
+mlable = ">=0.20"
+python = ">=3.10,<3.13"
 tensorflow = ">=2.16, <2.19"
+tokun = ">=0.15"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "*"
