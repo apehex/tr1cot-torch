@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "tr1cot"
-version = "0.0.1"
+version = "0.0.2"
 description = "Diffusion on language, with fractal shaping."
 license = ".github/LICENSE.md"
 readme = ".github/README.md"
@@ -12,7 +12,7 @@ densecurves = ">=0.1"
 mlable = ">=0.20"
 python = ">=3.10,<3.13"
 tensorflow = ">=2.16, <2.19"
-tokun = ">=0.15"
+tokun = ">=0.16"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "*"
