@@ -16,8 +16,15 @@ END_RATE = 0.02 # signal rate at the end of the forward diffusion process
 
 @tf.keras.utils.register_keras_serializable(package='models')
 class UnetDiffusionModel(mlable.models.diffusion.LatentDiffusionModel):
-    def __init__(self, block_num: int, latent_dim: iter, start_rate: float=START_RATE, end_rate: float=END_RATE, **kwargs) -> None:
-        super(UnetDiffusionModel, self).__init__(**kwargs)
+    def __init__(
+        self,
+        block_num: int,
+        latent_dim: iter,
+        start_rate: float=START_RATE,
+        end_rate: float=END_RATE,
+        **kwargs
+    ) -> None:
+        super(UnetDiffusionModel, self).__init__(start_rate=start_rate, end_rate=end_rate, **kwargs)
         # save the config to init later
         self._config.update({'block_num': block_num, 'latent_dim': [latent_dim] if isinstance(latent_dim, int) else list(latent_dim),})
         # layers

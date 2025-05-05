@@ -49,8 +49,8 @@ class UnetDiffusionModelTest(tf.test.TestCase):
             # decode
             self.assertEqual(len(__case['args']['latent_dim'][1:]), len(__model._decode_blocks))
             # project
-            self.assertEqual((__case['args']['latent_dim'][0], tuple(__case['latents'].shape)[-1]), tuple(__model._project_block.weights[0].shape))
-            self.assertEqual((tuple(__case['latents'].shape)[-1],), tuple(__model._project_block.weights[-1].shape))
+            self.assertEqual((__case['args']['latent_dim'][0], __feature_dim), tuple(__model._project_block.weights[0].shape))
+            self.assertEqual((__feature_dim,), tuple(__model._project_block.weights[-1].shape))
 
     def test_shapes_and_dtypes(self):
         for __case in self._cases:
