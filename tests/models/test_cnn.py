@@ -15,7 +15,7 @@ class UnetDiffusionModelTest(tf.test.TestCase):
         self._cases = [
             {
                 'tokun': '../tokun/models/vqvae.4x64.keras',
-                'inputs': tf.ones((2, 8, 8, 4), dtype=tf.int32),
+                'inputs': tf.random.uniform((2, 8, 8, 4), minval=0, maxval=256, dtype=tf.int32),
                 'latents': tf.random.normal((2, 8, 8, 256), dtype=tf.float32),
                 'variances': tf.random.uniform((2, 1, 1, 1), minval=0.0, maxval=1.0, dtype=tf.float32),
                 'args': {'block_num': 2, 'latent_dim': [128], 'start_rate': 0.95, 'end_rate': 0.05,},
@@ -86,6 +86,26 @@ class UnetDiffusionModelTest(tf.test.TestCase):
             __outputs = __model._project_block(__outputs + __residuals)
             self.assertEqual((__batch_dim, __height_dim, __width_dim, __feature_dim), tuple(__outputs.shape))
 
+    def test_latent_space_is_normal(self):
+        for __case in self._cases:
+            # parse
+            __batch_dim, __height_dim, __width_dim, __feature_dim = tuple(__case['latents'].shape)
+            # init
+            __model = tr1cot.models.cnn.UnetDiffusionModel(**__case['args'])
+            __tokun = tf.keras.models.load_model(__case['tokun'], compile=False)
+            # build
+            __model.set_vae(__tokun, trainable=False)
+            __model((__case['latents'], __case['variances']), training=False)
+            __tokun(__case['inputs'], training=False)
+            # encode into the latent space
+            __latents = __model.preprocess(__case['inputs'])
+            # compute mean and std deviation
+            __mean = tf.math.reduce_mean(__latents)
+            __sigma = tf.math.reduce_std(__latents)
+            # compare to the normal distribution
+            self.assertEqual(0, int(tf.round(10.0 * __mean)))
+            self.assertEqual(100, int(tf.round(100.0 * __sigma)))
+
     def test_sample_generation(self):
         for __case in self._cases:
             # parse
@@ -98,4 +118,5 @@ class UnetDiffusionModelTest(tf.test.TestCase):
             __model((__case['latents'], __case['variances']), training=False)
             __tokun(__case['inputs'], training=False)
             # generate
-            assert True
+            __samples = __model.generate(sample_num=2, step_num=4, logits=True)
+            self.assertEqual((2, __height_dim, __width_dim, 8 * tuple(__case['inputs'].shape)[-1]), tuple(__samples.shape))
