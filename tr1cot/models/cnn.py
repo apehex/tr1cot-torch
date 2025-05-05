@@ -25,6 +25,7 @@ class UnetDiffusionModel(mlable.models.diffusion.LatentDiffusionModel):
         self._concat_block = None
         self._embed_height_block = None
         self._embed_width_block = None
+        self._expand_block = None
         self._encode_blocks = []
         self._transform_blocks = []
         self._decode_blocks = []
@@ -43,6 +44,7 @@ class UnetDiffusionModel(mlable.models.diffusion.LatentDiffusionModel):
         self._concat_block = tf.keras.layers.Concatenate(axis=-1)
         self._embed_height_block = mlable.layers.embedding.PositionalEmbedding(sequence_axis=1, feature_axis=-1)
         self._embed_width_block = mlable.layers.embedding.PositionalEmbedding(sequence_axis=2, feature_axis=-1)
+        self._expand_block = tf.keras.layers.Dense(units=self._config['latent_dim'][0], activation=None, use_bias=True)
         self._encode_blocks = [tr1cot.layers.convolution.DownBlock(block_dim=__d, block_num=self._config['block_num']) for __d in self._config['latent_dim'][:-1]]
         self._transform_blocks = [tr1cot.layers.convolution.ResidualBlock(latent_dim=self._config['latent_dim'][-1]) for _ in range(self._config['block_num'])]
         self._decode_blocks = [tr1cot.layers.convolution.UpBlock(block_dim=__d, block_num=self._config['block_num']) for __d in reversed(self._config['latent_dim'][:-1])]
@@ -56,6 +58,8 @@ class UnetDiffusionModel(mlable.models.diffusion.LatentDiffusionModel):
         __shape_o = self._embed_height_block.compute_output_shape(__shape_o)
         self._embed_width_block.build(__shape_o)
         __shape_o = self._embed_width_block.compute_output_shape(__shape_o)
+        self._expand_block.build(__shape_o)
+        __shape_o = self._expand_block.compute_output_shape(__shape_o)
         for __b in self._encode_blocks:
             __b.build(__shape_o)
             __shape_o = __b.compute_output_shape(__shape_o)
@@ -81,6 +85,8 @@ class UnetDiffusionModel(mlable.models.diffusion.LatentDiffusionModel):
         # embed the spatial axes (B, H, W, E+1)
         __outputs = self._embed_height_block(__outputs)
         __outputs = self._embed_width_block(__outputs)
+        # expand (B, H, W, E+1) => (B, H, W, L)
+        __outputs = self._expand_block(__outputs)
         # save residuals that skip the whole sampling process
         __residuals = __outputs
         # downsample (B, Hi, Wi, Li) => (B, Hi/2, Wi/2, Li+1)
