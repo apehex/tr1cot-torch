@@ -38,7 +38,7 @@ class ResidualBlock(tf.keras.layers.Layer):
         __shape = tuple(input_shape)
         __filters = self._config['latent_dim'] or __shape[-1]
         __groups = 2 ** int(0.5 * math.log2(__shape[-1]))
-        __args = {'filters': __filters, 'strides': 1, 'use_bias': True, 'padding': 'same', 'data_format': 'channels_last',} # self._config['latent_dim']
+        __args = {'filters': __filters, 'strides': 1, 'use_bias': True, 'padding': 'same', 'data_format': 'channels_last',}
         # update
         self._config['latent_dim'] = __filters
         # init
