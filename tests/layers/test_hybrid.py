@@ -4,18 +4,18 @@ import tr1cot.layers.hybrid
 
 # PATCHING #####################################################################
 
-class HybridBlockTest(tf.test.TestCase):
+class HybridTransformerBlockTest(tf.test.TestCase):
     def setUp(self):
-        super(HybridBlockTest, self).setUp()
+        super(HybridTransformerBlockTest, self).setUp()
         self._null_cases = [
             {
-                'inputs': tf.ones((2, 16, 16, 8), dtype=tf.float16),
+                'inputs': tf.random.uniform((2, 16, 16, 8), dtype=tf.float16),
                 'args': {'patch_dim': 2, 'block_num': 2, 'head_num': 2, 'dropout_val': 0.1, 'epsilon_val': 1e-6,},},
             {
-                'inputs': tf.ones((2, 4, 16, 8), dtype=tf.float16),
+                'inputs': tf.random.uniform((2, 4, 16, 8), dtype=tf.bfloat16),
                 'args': {'patch_dim': 2, 'block_num': 2},},
             {
-                'inputs': tf.ones((2, 16, 16, 8), dtype=tf.float16),
+                'inputs': tf.random.uniform((2, 16, 16, 8), dtype=tf.float32),
                 'args': {'patch_dim': 1, 'block_num': 4},},
             {
                 'inputs': tf.cast([16 * [16 * [8 * [__i + 1]]] for __i in range(2)], dtype=tf.float32),
@@ -23,7 +23,7 @@ class HybridBlockTest(tf.test.TestCase):
 
     def test_shapes_and_dtypes(self):
         for __case in self._null_cases:
-            __layer = tr1cot.layers.hybrid.HybridBlock(**__case['args'])
+            __layer = tr1cot.layers.hybrid.HybridTransformerBlock(**__case['args'])
             # end-to-end
             __outputs = __layer(__case['inputs'], training=False)
             self.assertEqual(tuple(__case['inputs'].shape), tuple(__outputs.shape))

@@ -20,7 +20,7 @@ HEAD_NUM = 4 # H
 # TRANSFORMER ##################################################################
 
 @tf.keras.utils.register_keras_serializable(package='blocks')
-class HybridBlock(tf.keras.layers.Layer):
+class HybridTransformerBlock(tf.keras.layers.Layer):
     def __init__(
         self,
         patch_dim: int=PATCH_DIM,
@@ -30,7 +30,7 @@ class HybridBlock(tf.keras.layers.Layer):
         epsilon_val: float=EPSILON,
         **kwargs
     ) -> None:
-        super(HybridBlock, self).__init__(**kwargs)
+        super(HybridTransformerBlock, self).__init__(**kwargs)
         # save the config to init later
         self._config = {
             'block_num': block_num,
@@ -66,7 +66,7 @@ class HybridBlock(tf.keras.layers.Layer):
         return functools.reduce(lambda __x, __b: __b(__x, training=training), self._blocks, inputs)
 
     def get_config(self) -> dict:
-        __config = super(HybridBlock, self).get_config()
+        __config = super(HybridTransformerBlock, self).get_config()
         __config.update(self._config)
         return __config
 
