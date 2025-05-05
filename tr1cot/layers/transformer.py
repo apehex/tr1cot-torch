@@ -94,3 +94,109 @@ class PatchTransformerBlock(tf.keras.layers.Layer):
     @classmethod
     def from_config(cls, config) -> tf.keras.layers.Layer:
         return cls(**config)
+
+# DOWNSAMPLING #################################################################
+
+@tf.keras.utils.register_keras_serializable(package='blocks')
+class DownBlock(tf.keras.layers.Layer):
+    def __init__(
+        self,
+        patch_dim: int,
+        **kwargs
+    ) -> None:
+        # init
+        super(DownBlock, self).__init__(**kwargs)
+        # config
+        self._config = {'patch_dim': patch_dim,}
+        # layers
+        self._patch = None
+        self._dense = None
+
+    def build(self, input_shape: tuple) -> None:
+        __batch_dim, __height_dim, __width_dim, __feature_dim = tuple(input_shape)
+        # downsample with patching
+        self._patch = mlable.blocks.shaping.PixelPacking(
+            patch_dim=self._config['patch_dim'],
+            height_axis=1,
+            width_axis=2)
+        # compress the features
+        self._dense = tf.keras.layers.Dense(
+            units=__feature_dim * self._config['patch_dim'], # F*P instead of F*P*P
+            activation=None,
+            use_bias=True)
+        # build
+        self._patch.build(input_shape)
+        self._dense.build(self._patch.compute_output_shape(input_shape))
+        # register
+        self.built = True
+
+    def compute_output_shape(self, input_shape: tuple) -> tuple:
+        return self._dense.compute_output_shape(self._patch.compute_output_shape(input_shape))
+
+    def call(self, inputs: tf.Tensor, **kwargs) -> tf.Tensor:
+        # downsample (B, H, W, E) => (B, H/P, W/P, PPE)
+        __outputs = self._patch(inputs)
+        # compress (B, H/P, W/P, PPE) => (B, H/P, W/P, PE)
+        return self._dense(__outputs)
+
+    def get_config(self) -> dict:
+        __config = super(DownBlock, self).get_config()
+        __config.update(self._config)
+        return __config
+
+    @classmethod
+    def from_config(cls, config) -> tf.keras.layers.Layer:
+        return cls(**config)
+
+# UP SAMPLE ####################################################################
+
+@tf.keras.utils.register_keras_serializable(package='blocks')
+class UpBlock(tf.keras.layers.Layer):
+    def __init__(
+        self,
+        patch_dim: int,
+        **kwargs
+    ) -> None:
+        # init
+        super(UpBlock, self).__init__(**kwargs)
+        # config
+        self._config = {'patch_dim': patch_dim,}
+        # layers
+        self._dense = None
+        self._patch = None
+
+    def build(self, input_shape: tuple) -> None:
+        __batch_dim, __height_dim, __width_dim, __feature_dim = tuple(input_shape)
+        # expand the features
+        self._dense = tf.keras.layers.Dense(
+            units=__feature_dim * self._config['patch_dim'],
+            activation=None,
+            use_bias=True)
+        # upample with unpatching
+        self._patch = mlable.blocks.shaping.PixelShuffle(
+            patch_dim=self._config['patch_dim'],
+            height_axis=1,
+            width_axis=2)
+        # build
+        self._dense.build(input_shape)
+        self._patch.build(self._dense.compute_output_shape(input_shape))
+        # register
+        self.built = True
+
+    def compute_output_shape(self, input_shape: tuple) -> tuple:
+        return self._patch.compute_output_shape(self._dense.compute_output_shape(input_shape))
+
+    def call(self, inputs: tf.Tensor, **kwargs) -> tf.Tensor:
+        # expand (B, H/P, W/P, PE) => (B, H/P, W/P, PPE)
+        __outputs = self._dense(inputs)
+        # upsample (B, H/P, W/P, PPE) => (B, H, W, E)
+        return self._patch(__outputs)
+
+    def get_config(self) -> dict:
+        __config = super(UpBlock, self).get_config()
+        __config.update(self._config)
+        return __config
+
+    @classmethod
+    def from_config(cls, config) -> tf.keras.layers.Layer:
+        return cls(**config)

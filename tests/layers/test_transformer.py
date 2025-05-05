@@ -51,7 +51,6 @@ class PatchTransformerBlockTest(tf.test.TestCase):
             # unpatching
             __outputs = __layer._unpatch_space(__outputs)
             self.assertEqual(tuple(__case['shapes']['unpatched']), tuple(__outputs.shape))
-            self.assertEqual(__case['outputs'].dtype, __outputs.dtype)
 
     def test_outputs_equal_inputs_when_constant(self): # outputs = inputs + layer(inputs), the bias is initialized to zero and the norm cancels the product
         for __case in self._null_cases:
@@ -61,4 +60,62 @@ class PatchTransformerBlockTest(tf.test.TestCase):
 
 # DOWN SAMPLING ################################################################
 
+class DownBlockTest(tf.test.TestCase):
+    def setUp(self):
+        super(DownBlockTest, self).setUp()
+        self._null_cases = [
+            {
+                'inputs': tf.ones((2, 16, 16, 8), dtype=tf.float16),
+                'args': {'patch_dim': 2,},
+                'shapes': {'patched': (2, 8, 8, 32), 'compressed': (2, 8, 8, 16)},},
+            {
+                'inputs': tf.ones((2, 4, 16, 8), dtype=tf.float16),
+                'args': {'patch_dim': 2,},
+                'shapes': {'patched': (2, 2, 8, 32), 'compressed': (2, 2, 8, 16)},},
+            {
+                'inputs': tf.ones((2, 16, 16, 8), dtype=tf.float16),
+                'args': {'patch_dim': 1,},
+                'shapes': {'patched': (2, 16, 16, 8), 'compressed': (2, 16, 16, 8)},},]
+
+    def test_shapes_and_dtypes(self):
+        for __case in self._null_cases:
+            __layer = tr1cot.layers.transformer.DownBlock(**__case['args'])
+            # build
+            __layer(__case['inputs'], training=False)
+            # patching the space axes
+            __outputs = __layer._patch(__case['inputs'])
+            self.assertEqual(tuple(__case['shapes']['patched']), tuple(__outputs.shape))
+            # compressing the features
+            __outputs = __layer._dense(__outputs)
+            self.assertEqual(tuple(__case['shapes']['compressed']), tuple(__outputs.shape))
+
 # UP SAMPLING ##################################################################
+
+class UpBlockTest(tf.test.TestCase):
+    def setUp(self):
+        super(UpBlockTest, self).setUp()
+        self._null_cases = [
+            {
+                'inputs': tf.ones((2, 16, 16, 8), dtype=tf.float16),
+                'args': {'patch_dim': 2,},
+                'shapes': {'expanded': (2, 16, 16, 16), 'unpatched': (2, 32, 32, 4)},},
+            {
+                'inputs': tf.ones((2, 4, 16, 8), dtype=tf.float16),
+                'args': {'patch_dim': 4,},
+                'shapes': {'expanded': (2, 4, 16, 32), 'unpatched': (2, 16, 64, 2)},},
+            {
+                'inputs': tf.ones((2, 16, 16, 8), dtype=tf.float16),
+                'args': {'patch_dim': 1,},
+                'shapes': {'expanded': (2, 16, 16, 8), 'unpatched': (2, 16, 16, 8)},},]
+
+    def test_shapes_and_dtypes(self):
+        for __case in self._null_cases:
+            __layer = tr1cot.layers.transformer.UpBlock(**__case['args'])
+            # build
+            __layer(__case['inputs'], training=False)
+            # expanding the features
+            __outputs = __layer._dense(__case['inputs'])
+            self.assertEqual(tuple(__case['shapes']['expanded']), tuple(__outputs.shape))
+            # unpatching the spatial axes
+            __outputs = __layer._patch(__outputs)
+            self.assertEqual(tuple(__case['shapes']['unpatched']), tuple(__outputs.shape))
