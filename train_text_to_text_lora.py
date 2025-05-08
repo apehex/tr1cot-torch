@@ -48,7 +48,7 @@ def log_validation(
     pipeline = pipeline.to(accelerator.device)
     pipeline.set_progress_bar_config(disable=True)
     generator = torch.Generator(device=accelerator.device)
-    generator = generator.manual_seed(args.getattr('seed', random.randint(2 ** 32)))
+    generator = generator.manual_seed(args.seed)
     autocast_ctx = torch.autocast(accelerator.device.type)
 
     with autocast_ctx:
@@ -159,7 +159,7 @@ def parse_args():
         default=None,
         help="The directory where the downloaded models and datasets will be stored.",
     )
-    parser.add_argument("--seed", type=int, default=random.randint(2 ** 32), help="A seed for reproducible training.")
+    parser.add_argument("--seed", type=int, default=random.randint(0, 2 ** 32), help="A seed for reproducible training.")
     parser.add_argument(
         "--resolution",
         type=int,
@@ -383,7 +383,7 @@ def main():
         diffusers.utils.logging.set_verbosity_error()
 
     # If passed along, set the training seed now.
-    accelerate.utils.set_seed(args.getattr('seed', random.randint(2 ** 32)))
+    accelerate.utils.set_seed(args.seed)
 
     # Handle the repository creation
     if accelerator.is_main_process:
@@ -568,7 +568,7 @@ def main():
 
     with accelerator.main_process_first():
         if args.max_train_samples is not None:
-            dataset["train"] = dataset["train"].shuffle(seed=args.getattr('seed', random.randint(2 ** 32))).select(range(args.max_train_samples))
+            dataset["train"] = dataset["train"].shuffle(seed=args.seed).select(range(args.max_train_samples))
         # Set the training transforms
         train_dataset = dataset["train"].with_transform(preprocess_train)
 
