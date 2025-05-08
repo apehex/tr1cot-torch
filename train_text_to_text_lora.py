@@ -33,6 +33,12 @@ import diffusers.utils.torch_utils
 
 logger = accelerate.logging.get_logger(__name__, log_level='INFO')
 
+# CONSTANTS ####################################################################
+
+DTYPES = {'fp16': torch.float16, 'bf16': torch.bfloat16}
+
+# VALIDATION ###################################################################
+
 def log_validation(
     pipeline,
     args,
@@ -62,6 +68,7 @@ def log_validation(
             tracker.writer.add_images(phase_name, np_images, epoch, dataformats='NHWC')
     return images
 
+# ARGS #########################################################################
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Simple example of a training script.')
@@ -132,11 +139,7 @@ def parse_args():
 
     return args
 
-
-DATASET_NAME_MAPPING = {
-    'lambdalabs/naruto-blip-captions': ('image', 'text'),
-}
-
+# MAIN #########################################################################
 
 def main():
     args = parse_args()
@@ -154,31 +157,23 @@ def main():
         project_config=accelerator_project_config,
     )
 
-    # Make one log on every process with the configuration for debugging.
+    # make one log on every process with the configuration for debugging
     logging.basicConfig(
         format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
         datefmt='%m/%d/%Y %H:%M:%S',
-        level=logging.INFO,
-    )
+        level=logging.INFO,)
     logger.info(accelerator.state, main_process_only=False)
-    if accelerator.is_local_main_process:
-        datasets.utils.logging.set_verbosity_warning()
-        transformers.utils.logging.set_verbosity_warning()
-        diffusers.utils.logging.set_verbosity_info()
-    else:
-        datasets.utils.logging.set_verbosity_error()
-        transformers.utils.logging.set_verbosity_error()
-        diffusers.utils.logging.set_verbosity_error()
+    datasets.utils.logging.set_verbosity_warning()
+    transformers.utils.logging.set_verbosity_warning()
+    diffusers.utils.logging.set_verbosity_info()
 
-    # If passed along, set the training seed now.
+    # set the training seed now
     accelerate.utils.set_seed(args.seed)
 
-    # Handle the repository creation
-    if accelerator.is_main_process:
-        if args.output_dir is not None:
-            os.makedirs(args.output_dir, exist_ok=True)
+    # create the output directory
+    os.makedirs(args.output_dir, exist_ok=True)
 
-    # Load scheduler, tokenizer and models.
+    # load scheduler, tokenizer and models
     noise_scheduler = diffusers.DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder='scheduler')
     tokenizer = transformers.CLIPTokenizer.from_pretrained(
         args.pretrained_model_name_or_path, subfolder='tokenizer', revision=args.revision
@@ -192,32 +187,28 @@ def main():
     unet = diffusers.UNet2DConditionModel.from_pretrained(
         args.pretrained_model_name_or_path, subfolder='unet', revision=args.revision, variant=args.variant
     )
+
     # freeze parameters of models to save more memory
     unet.requires_grad_(False)
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
 
-    # For mixed precision training we cast all non-trainable weights (vae, non-lora text_encoder and non-lora unet) to half-precision
-    # as these weights are only used for inference, keeping weights in full precision is not required.
-    weight_dtype = torch.float32
-    if accelerator.mixed_precision == 'fp16':
-        weight_dtype = torch.float16
-    elif accelerator.mixed_precision == 'bf16':
-        weight_dtype = torch.bfloat16
+    # cast all non-trainable weights (vae, non-lora text_encoder and non-lora unet) to half-precision
+    weight_dtype = DTYPES.get(accelerator.mixed_precision, torch.float32)
 
-    unet_lora_config = peft.LoraConfig(
-        r=args.rank,
-        lora_alpha=args.rank,
-        init_lora_weights='gaussian',
-        target_modules=['to_k', 'to_q', 'to_v', 'to_out.0'],
-    )
-
-    # Move unet, vae and text_encoder to device and cast to weight_dtype
+    # move unet, vae and text_encoder to device and cast to weight_dtype
     unet.to(accelerator.device, dtype=weight_dtype)
     vae.to(accelerator.device, dtype=weight_dtype)
     text_encoder.to(accelerator.device, dtype=weight_dtype)
 
-    # Add adapter and make sure the trainable params are in float32.
+    # init the LORA config
+    unet_lora_config = peft.LoraConfig(
+        r=args.rank,
+        lora_alpha=args.rank,
+        init_lora_weights='gaussian',
+        target_modules=['to_k', 'to_q', 'to_v', 'to_out.0'],)
+
+    # add adapter and make sure the trainable params are in float32
     unet.add_adapter(unet_lora_config)
     if args.mixed_precision == 'fp16':
         # only upcast trainable parameters (LoRA) into fp32
@@ -228,25 +219,17 @@ def main():
     if args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
 
-    # Enable TF32 for faster training on Ampere GPUs,
     # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
-    if args.allow_tf32:
-        torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cuda.matmul.allow_tf32 = args.allow_tf32
 
     if args.scale_lr:
         args.learning_rate = (
             args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes
         )
 
-    # Initialize the optimizer
+    # init the optimizer
     if args.use_8bit_adam:
-        try:
-            import bitsandbytes
-        except ImportError:
-            raise ImportError(
-                'Please install bitsandbytes to use 8-bit Adam. You can do so by running `pip install bitsandbytes`'
-            )
-
+        import bitsandbytes
         optimizer_cls = bitsandbytes.optim.AdamW8bit
     else:
         optimizer_cls = torch.optim.AdamW
@@ -258,7 +241,7 @@ def main():
         weight_decay=args.adam_weight_decay,
         eps=args.adam_epsilon,)
 
-    # download the dataset.
+    # download the dataset
     dataset = datasets.load_dataset(
         args.dataset_name,
         args.dataset_config_name,
@@ -271,30 +254,12 @@ def main():
     #     data_files={'train': os.path.join(args.train_data_dir, '**')},
     #     cache_dir=args.cache_dir,)
 
-    # tokenize inputs and targets.
+    # select the fields in the dataset to parse data from
     column_names = dataset['train'].column_names
+    image_column = args.image_column if (args.image_column in column_names) else column_names[0]
+    caption_column = args.caption_column if (args.caption_column in column_names) else column_names[1]
 
-    # 6. Get the column names for input/target.
-    dataset_columns = DATASET_NAME_MAPPING.get(args.dataset_name, None)
-    if args.image_column is None:
-        image_column = dataset_columns[0] if dataset_columns is not None else column_names[0]
-    else:
-        image_column = args.image_column
-        if image_column not in column_names:
-            raise ValueError(
-                f'--image_column" value "{args.image_column}" needs to be one of: {", ".join(column_names)}'
-            )
-    if args.caption_column is None:
-        caption_column = dataset_columns[1] if dataset_columns is not None else column_names[1]
-    else:
-        caption_column = args.caption_column
-        if caption_column not in column_names:
-            raise ValueError(
-                f'--caption_column" value "{args.caption_column}" needs to be one of: {", ".join(column_names)}'
-            )
-
-    # Preprocessing the datasets.
-    # We need to tokenize input captions and transform the images.
+    # tokenize input captions
     def tokenize_captions(examples, is_train=True):
         captions = []
         for caption in examples[caption_column]:
@@ -304,20 +269,17 @@ def main():
                 # take a random caption if there are multiple
                 captions.append(random.choice(caption) if is_train else caption[0])
             else:
-                raise ValueError(
-                    f'Caption column `{caption_column}` should contain either strings or lists of strings.'
-                )
+                raise ValueError(f'Caption column `{caption_column}` should contain either strings or lists of strings.')
         inputs = tokenizer(
-            captions, max_length=tokenizer.model_max_length, padding='max_length', truncation=True, return_tensors='pt'
-        )
+            captions,
+            max_length=tokenizer.model_max_length,
+            padding='max_length',
+            truncation=True,
+            return_tensors='pt')
         return inputs.input_ids
 
     # Get the specified interpolation method from the args
-    interpolation = getattr(torchvision.transforms.InterpolationMode, args.image_interpolation_mode.upper(), None)
-
-    # Raise an error if the interpolation method is invalid
-    if interpolation is None:
-        raise ValueError(f'Unsupported interpolation mode {args.image_interpolation_mode}.')
+    interpolation = getattr(torchvision.transforms.InterpolationMode, args.image_interpolation_mode.upper(), 'lanczos')
 
     # Data preprocessing transformations
     train_transforms = torchvision.transforms.Compose(
