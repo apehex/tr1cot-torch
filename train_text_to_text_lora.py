@@ -90,8 +90,8 @@ def parse_args():
     parser.add_argument('--seed', type=int, default=random.randint(0, 2 ** 32), help='A seed for reproducible training.')
     # preprocessing config
     parser.add_argument('--resolution', type=int, default=512, required=False, help='The resolution for input images.')
-    parser.add_argument('--center_crop', type=bool, default=False, required=False, action='store_true', help='Whether to center (instead of random) crop the input images to the resolution.')
-    parser.add_argument('--random_flip', type=bool, default=True, required=False, action='store_true', help='whether to randomly flip images horizontally.')
+    parser.add_argument('--center_crop', default=False, required=False, action='store_true', help='Whether to center (instead of random) crop the input images to the resolution.')
+    parser.add_argument('--random_flip', default=False, required=False, action='store_true', help='whether to randomly flip images horizontally.')
     parser.add_argument('--image_interpolation_mode', type=str, default='lanczos', choices=[f.lower() for f in dir(torchvision.transforms.InterpolationMode) if not f.startswith('__') and not f.endswith('__')], required=False, help='The image interpolation method to use for resizing images.')
     # iteration config
     parser.add_argument('--train_batch_size', type=int, default=16, required=False, help='Batch size (per device) for the training dataloader.')
@@ -101,18 +101,18 @@ def parse_args():
     parser.add_argument('--checkpoints_total_limit', type=int, default=None, required=False, help='Max number of checkpoints to store.')
     # gradient config
     parser.add_argument('--gradient_accumulation_steps', type=int, default=1, required=False, help='Number of updates steps to accumulate before performing a backward/update pass.')
-    parser.add_argument('--gradient_checkpointing', type=bool, default=False, required=False, action='store_true', help='Whether or not to use gradient checkpointing to save memory at the expense of slower backward pass.')
+    parser.add_argument('--gradient_checkpointing', default=False, required=False, action='store_true', help='Whether or not to use gradient checkpointing to save memory at the expense of slower backward pass.')
     # learning-rate config
     parser.add_argument('--learning_rate', type=float, default=1e-4, required=False, help='Initial learning rate (after the potential warmup period) to use.')
-    parser.add_argument('--scale_lr', type=bool, default=False, required=False, action='store_true', help='Scale the learning rate by the number of GPUs, gradient accumulation steps, and batch size.')
+    parser.add_argument('--scale_lr', default=False, required=False, action='store_true', help='Scale the learning rate by the number of GPUs, gradient accumulation steps, and batch size.')
     parser.add_argument('--lr_scheduler', type=str, default='constant', required=False, help='The scheduler type to use, among ["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup"]')
     parser.add_argument('--lr_warmup_steps', type=int, default=500, required=False, help='Number of steps for the warmup in the lr scheduler.')
     # loss config
     parser.add_argument('--snr_gamma', type=float, default=None, required=False, help='SNR weighting gamma to rebalance the loss; ecommended value is 5.0. https://arxiv.org/pdf/2303.09556')
     # precision config
     parser.add_argument('--mixed_precision', type=str, default=None, required=False, choices=['no', 'fp16', 'bf16'], help='Choose between fp16 and bf16 (bfloat16).')
-    parser.add_argument('--allow_tf32', type=bool, default=False, required=False, action='store_true', help='Whether or not to allow TF32 on Ampere GPUs. Can be used to speed up training.')
-    parser.add_argument('--use_8bit_adam', type=bool, default=False, required=False, action='store_true', help='Whether or not to use 8-bit Adam from bitsandbytes.')
+    parser.add_argument('--allow_tf32', default=False, required=False, action='store_true', help='Whether or not to allow TF32 on Ampere GPUs. Can be used to speed up training.')
+    parser.add_argument('--use_8bit_adam', default=False, required=False, action='store_true', help='Whether or not to use 8-bit Adam from bitsandbytes.')
     # distribution config
     parser.add_argument('--dataloader_num_workers', type=int, default=0, required=False, help='Number of subprocesses to use for data loading; 0 means that the data will be loaded in the main process.')
     parser.add_argument('--local_rank', type=int, default=int(os.environ.get('LOCAL_RANK', -1)), required=False, help='For distributed training: local_rank')
@@ -123,7 +123,7 @@ def parse_args():
     parser.add_argument('--adam_epsilon', type=float, default=1e-08, required=False, help='Epsilon value for the Adam optimizer')
     parser.add_argument('--max_grad_norm', default=1.0, type=float, required=False, help='Max gradient norm.')
     # implementation config
-    parser.add_argument('--enable_xformers_memory_efficient_attention', type=bool, default=False, required=False, action='store_true', help='Whether or not to use xformers.')
+    parser.add_argument('--enable_xformers_memory_efficient_attention', default=False, required=False, action='store_true', help='Whether or not to use xformers.')
     # other config
     parser.add_argument('--prediction_type', type=str, default=None, required=False, help='The prediction type, among "epsilon", "v_prediction" or `None`.')
     parser.add_argument('--noise_offset', type=float, default=0, required=False, help='The scale of noise offset.')
