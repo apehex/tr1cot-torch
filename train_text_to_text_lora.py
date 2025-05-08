@@ -405,7 +405,7 @@ def main():
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
         if num_training_steps_for_scheduler != args.max_train_steps * accelerator.num_processes:
             logger.warning(
-                f'The length of the 'train_dataloader' after 'accelerator.prepare' ({len(train_dataloader)}) does not match '
+                f'The length of the "train_dataloader" after "accelerator.prepare" ({len(train_dataloader)}) does not match '
                 f'the expected length ({len_train_dataloader_after_sharding}) when the learning rate scheduler was created. '
                 f'This inconsistency may result in the learning rate scheduler not functioning properly.'
             )
