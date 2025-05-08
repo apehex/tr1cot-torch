@@ -95,7 +95,7 @@ def parse_args():
     parser.add_argument('--image_interpolation_mode', type=str, default='lanczos', choices=[f.lower() for f in dir(torchvision.transforms.InterpolationMode) if not f.startswith('__') and not f.endswith('__')], required=False, help='The image interpolation method to use for resizing images.')
     # iteration config
     parser.add_argument('--train_batch_size', type=int, default=16, required=False, help='Batch size (per device) for the training dataloader.')
-    parser.add_argument('--num_train_epochs', type=int, default=100, required=False)
+    parser.add_argument('--num_train_epochs', type=int, default=128, required=False)
     parser.add_argument('--max_train_steps', type=int, default=None, required=False, help='Total number of training steps to perform; overrides num_train_epochs.')
     parser.add_argument('--checkpointing_steps', type=int, default=256, required=False, help='Save a checkpoint of the training state every X updates, for resuming with `--resume_from_checkpoint`.')
     parser.add_argument('--checkpoints_total_limit', type=int, default=None, required=False, help='Max number of checkpoints to store.')
@@ -106,7 +106,7 @@ def parse_args():
     parser.add_argument('--learning_rate', type=float, default=1e-4, required=False, help='Initial learning rate (after the potential warmup period) to use.')
     parser.add_argument('--scale_lr', default=False, required=False, action='store_true', help='Scale the learning rate by the number of GPUs, gradient accumulation steps, and batch size.')
     parser.add_argument('--lr_scheduler', type=str, default='constant', required=False, help='The scheduler type to use, among ["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup"]')
-    parser.add_argument('--lr_warmup_steps', type=int, default=500, required=False, help='Number of steps for the warmup in the lr scheduler.')
+    parser.add_argument('--lr_warmup_steps', type=int, default=512, required=False, help='Number of steps for the warmup in the lr scheduler.')
     # loss config
     parser.add_argument('--snr_gamma', type=float, default=None, required=False, help='SNR weighting gamma to rebalance the loss; ecommended value is 5.0. https://arxiv.org/pdf/2303.09556')
     # precision config
@@ -122,11 +122,11 @@ def parse_args():
     parser.add_argument('--adam_weight_decay', type=float, default=1e-2, required=False, help='Weight decay to use.')
     parser.add_argument('--adam_epsilon', type=float, default=1e-08, required=False, help='Epsilon value for the Adam optimizer')
     parser.add_argument('--max_grad_norm', default=1.0, type=float, required=False, help='Max gradient norm.')
-    # implementation config
-    parser.add_argument('--enable_xformers_memory_efficient_attention', default=False, required=False, action='store_true', help='Whether or not to use xformers.')
     # other config
     parser.add_argument('--prediction_type', type=str, default=None, required=False, help='The prediction type, among "epsilon", "v_prediction" or `None`.')
     parser.add_argument('--noise_offset', type=float, default=0, required=False, help='The scale of noise offset.')
+    # implementation config
+    # parser.add_argument('--enable_xformers_memory_efficient_attention', default=False, required=False, action='store_true', help='Whether or not to use xformers.')
 
     args = parser.parse_args()
 
@@ -222,19 +222,6 @@ def main():
     if args.mixed_precision == 'fp16':
         # only upcast trainable parameters (LoRA) into fp32
         diffusers.training_utils.cast_training_params(unet, dtype=torch.float32)
-
-    if args.enable_xformers_memory_efficient_attention:
-        if diffusers.utils.import_utils.is_xformers_available():
-            import xformers
-
-            xformers_version = packaging.version.parse(xformers.__version__)
-            if xformers_version == packaging.version.parse('0.0.16'):
-                logger.warning(
-                    'xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details.'
-                )
-            unet.enable_xformers_memory_efficient_attention()
-        else:
-            raise ValueError('xformers is not available. Make sure it is installed correctly')
 
     lora_layers = filter(lambda p: p.requires_grad, unet.parameters())
 
