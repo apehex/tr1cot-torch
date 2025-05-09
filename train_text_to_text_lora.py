@@ -80,6 +80,74 @@ def unwrap_model(accelerator, model):
     __model = accelerator.unwrap_model(model)
     return __model._orig_mod if diffusers.utils.torch_utils.is_compiled_module(__model) else __model
 
+# 1D => 2D #####################################################################
+
+def chunk(seq: list, size: int, repeats: bool=True) -> list:
+    __chunks = (seq[__i:__i + size] for __i in range(0, len(seq), size))
+    return list(__chunks if repeats else set(__chunks))
+
+def split(text: str, height: int=64, width: int=64, separator: str='\n') -> list:
+    # typically split on \n or at a fixed size
+    __rows = text.split(separator) if separator else chunk(text, width)
+    # :width would leave one character out when width == -1
+    __width = slice(width if (width > 0) else None)
+    # idem fro the height
+    __height = slice(height if (height > 0) else None)
+    # enforce the maximum dimensions
+    return [__r[__width] for __r in __rows[__height] if __r]
+
+def pad(rows: list, height: int=64, width: int=64, value: str='\x00') -> list:
+    return [__r + (width - len(__r)) * value for __r in rows] + (height - len(rows)) [width * value]
+
+# RGB ENCODING #################################################################
+
+def rgb(rows: list) -> np.ndarray:
+    __height, __width = len(rows), len(rows[0])
+    # each character is encoded as 4 bytes
+    __rows = [list(__r.encode('utf-32-be')) for __r in rows]
+    # 2d reshaping
+    __array = np.array(__rows, dtype=np.uint8).reshape((__height, __width, 4))
+    # strip the leading byte, always null in utf-32 (big-endian)
+    return __array[..., 1:]
+
+# CUSTOM COLOR SCHEMES #########################################################
+
+def mix_channels(channels: np.ndarray) -> np.ndarray:
+    __mod = np.array(3 * [256], dtype=channels.dtype)
+    __mix = [channels[0] + channels[-1], channels[1] + channels[-1], channels[-1]]
+    return np.mod(__mix, __mod)
+
+def rgb_mixed(rows: list) -> np.ndarray:
+    return np.apply_along_axis(mix_channels, arr=rgb(rows).astype(np.int32), axis=-1)
+
+def rgb_hilbert(rows: list) -> np.ndarray:
+    __height, __width = len(rows), len(rows[0])
+    # each character is encoded as 4 bytes
+    __rows = [[densecurves.hilbert.point(ord(__c), order=8, rank=3) for __c in __r] for __r in rows]
+    # cast and reshape
+    return np.array(__rows, dtype=np.uint8).reshape((__height, __width, 3))
+
+# IMAGES #######################################################################
+
+def preprocess_images(examples: dict, height: int=64, width: int=64) -> list:
+    # split the ASCII art string line by line
+    __data = [split(__d, height=height, width=width, separator='\n') for __d in examples['content']]
+    # pad with null codepoints (=> null channels) to full height x width
+    __data = [pad(__d, height=height, width=width, value='\x00') for __d in __data]
+    # encode as rgb
+    __data = [rgb(__d) for __d in __data]
+    # format as pillow image
+    return [PIL.Image.fromarray(__d, mode='RGB') for __d in __data]
+
+# CAPTIONS #####################################################################
+
+def compose_caption(description: str, labels: str) -> str:
+    __options = labels.replace(
+        'braille', 'braille characters').replace(
+        'color', 'ANSI color codes').replace(
+        'negative', 'negative colors')
+    return '{description} in ASCII art with {options}'.format(description=description, options=__options)
+
 def tokenize_captions(captions, tokenizer):
     return tokenizer(
         captions,
@@ -88,12 +156,21 @@ def tokenize_captions(captions, tokenizer):
         truncation=True,
         return_tensors='pt').input_ids
 
+def preprocess_captions(examples: dict, tokenizer: callable) -> list:
+    __captions = [compose_caption(description=__c, labels=__l) for __c, __l in zip(examples['caption'], examples['labels'])]
+    return tokenize_captions(captions=__captions, tokenizer=tokenizer)
+
 # PREPROCESSING ################################################################
 
-def preprocess(examples, transforms, tokenizer, image_column='image', caption_column='text'):
+def preprocess(examples: dict, transforms: callable, tokenizer: callable, height: int=64, width: int=64):
+    # use UTF-32 encoding to interpret text as RGB data
+    __images = preprocess_images(examples=examples, height=height, width=width)
+    # specify both the ASCII art content and its style
+    __captions = preprocess_captions(examples=examples, tokenizer=tokenizer)
+    # apply image transformations (resize, crop, etc)
     return {
-        'pixel_values': [transforms(__i.convert('RGB')) for __i in examples[image_column]],
-        'input_ids': tokenize_captions(examples[caption_column], tokenizer=tokenizer),}
+        'pixel_values': [transforms(__i) for __i in __images],
+        'input_ids': __captions,}
 
 # POSTPROCESSING ###############################################################
 
@@ -311,8 +388,8 @@ def main():
         preprocess,
         transforms=train_transforms,
         tokenizer=tokenizer,
-        image_column=image_column,
-        caption_column=caption_column)
+        height=64,
+        width=64)
 
     with accelerator.main_process_first():
         if args.max_samples:
