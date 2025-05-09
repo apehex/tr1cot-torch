@@ -97,7 +97,7 @@ def split(text: str, height: int=64, width: int=64, separator: str='\n') -> list
     return [__r[__width] for __r in __rows[__height] if __r]
 
 def pad(rows: list, height: int=64, width: int=64, value: str='\x00') -> list:
-    return [__r + (width - len(__r)) * value for __r in rows] + (height - len(rows)) [width * value]
+    return [__r + (width - len(__r)) * value for __r in rows] + (height - len(rows)) * [width * value]
 
 # RGB ENCODING #################################################################
 
@@ -186,12 +186,12 @@ def parse_args():
     parser.add_argument('--variant', type=str, default=None, required=False, help='Variant of the model files of the pretrained model identifier from huggingface.co/models, e.g. fp16')
     parser.add_argument('--lora_rank', type=int, default=8, required=False, help='The dimension of the LoRA update matrices.')
     # dataset config
-    parser.add_argument('--dataset_name', type=str, default='lambdalabs/naruto-blip-captions', required=False, help='The name of the Dataset (from the HuggingFace hub) to train on.')
+    parser.add_argument('--dataset_name', type=str, default='apehex/ascii-art-datacompdr-12m', required=False, help='The name of the Dataset (from the HuggingFace hub) to train on.')
     parser.add_argument('--dataset_config', type=str, default='default', required=False, help='The config of the Dataset, leave as None if there\'s only one config.')
-    parser.add_argument('--dataset_split', type=str, default='train', required=False, help='The split of the Dataset.')
+    parser.add_argument('--dataset_split', type=str, default='fixed', required=False, help='The split of the Dataset.')
     parser.add_argument('--dataset_dir', type=str, default=None, required=False, help='A folder containing the training data.')
-    parser.add_argument('--image_column', type=str, default='image', required=False, help='The column of the dataset containing an image.')
-    parser.add_argument('--caption_column', type=str, default='text', required=False, help='The column of the dataset containing a caption or a list of captions.')
+    parser.add_argument('--image_column', type=str, default='content', required=False, help='The column of the dataset containing an image.')
+    parser.add_argument('--caption_column', type=str, default='caption', required=False, help='The column of the dataset containing a caption or a list of captions.')
     parser.add_argument('--max_samples', type=int, default=0, required=False, help='Truncate the number of training examples to this value if set.')
     # output config
     parser.add_argument('--output_dir', type=str, default='lora-model', required=False, help='The output directory where the model predictions and checkpoints will be written.')
