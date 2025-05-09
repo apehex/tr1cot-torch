@@ -2,12 +2,15 @@
 
 import argparse
 import contextlib
+import functools
 import logging
 import math
 import os
 import pathlib
 import random
 import shutil
+
+import PIL
 
 import accelerate
 import accelerate.logging
@@ -30,6 +33,9 @@ import diffusers.training_utils
 import diffusers.utils
 import diffusers.utils.import_utils
 import diffusers.utils.torch_utils
+
+import densecurves.hilbert
+import mlable.utils
 
 logger = accelerate.logging.get_logger(__name__, log_level='INFO')
 
@@ -56,17 +62,41 @@ def log_validation(
     generator = torch.Generator(device=accelerator.device)
     generator = generator.manual_seed(args.seed)
     autocast_ctx = torch.autocast(accelerator.device.type)
-
+    # mixed precision
     with autocast_ctx:
         for _ in range(args.num_validation_images):
             images.append(pipeline(args.validation_prompt, num_inference_steps=30, generator=generator).images[0])
-
+    # save the images
     for tracker in accelerator.trackers:
         phase_name = 'test' if is_final_validation else 'validation'
         if tracker.name == 'tensorboard':
             np_images = np.stack([np.asarray(img) for img in images])
             tracker.writer.add_images(phase_name, np_images, epoch, dataformats='NHWC')
+    # actual images (not tensors)
     return images
+
+# MODEL ########################################################################
+
+def unwrap_model(accelerator, model):
+    __model = accelerator.unwrap_model(model)
+    return __model._orig_mod if diffusers.utils.torch_utils.is_compiled_module(__model) else __model
+
+def tokenize_captions(captions, tokenizer):
+    return tokenizer(
+        captions,
+        max_length=tokenizer.model_max_length,
+        padding='max_length',
+        truncation=True,
+        return_tensors='pt').input_ids
+
+# PREPROCESSING ################################################################
+
+def preprocess(examples, transforms, image_column='image', caption_column='text'):
+    return {
+        'pixel_values': [transforms(__i.convert('RGB')) for __i in examples[image_column]],
+        'input_ids': tokenize_captions(examples[caption_column], tokenizer=tokenizer),}
+
+# POSTPROCESSING ###############################################################
 
 # ARGS #########################################################################
 
@@ -266,55 +296,29 @@ def main():
     image_column = args.image_column if (args.image_column in column_names) else column_names[0]
     caption_column = args.caption_column if (args.caption_column in column_names) else column_names[1]
 
-    # tokenize input captions
-    def tokenize_captions(examples, is_train=True):
-        captions = []
-        for caption in examples[caption_column]:
-            if isinstance(caption, str):
-                captions.append(caption)
-            elif isinstance(caption, (list, np.ndarray)):
-                # take a random caption if there are multiple
-                captions.append(random.choice(caption) if is_train else caption[0])
-            else:
-                raise ValueError(f'Caption column `{caption_column}` should contain either strings or lists of strings.')
-        inputs = tokenizer(
-            captions,
-            max_length=tokenizer.model_max_length,
-            padding='max_length',
-            truncation=True,
-            return_tensors='pt')
-        return inputs.input_ids
-
     # Get the specified interpolation method from the args
     interpolation = getattr(torchvision.transforms.InterpolationMode, args.image_interpolation_mode.upper(), 'lanczos')
 
-    # Data preprocessing transformations
-    train_transforms = torchvision.transforms.Compose(
-        [
+    # image transformations
+    train_transforms = torchvision.transforms.Compose([
             torchvision.transforms.Resize(args.resolution, interpolation=interpolation),  # Use dynamic interpolation method
             torchvision.transforms.CenterCrop(args.resolution) if args.center_crop else torchvision.transforms.RandomCrop(args.resolution),
             torchvision.transforms.RandomHorizontalFlip() if args.random_flip else torchvision.transforms.Lambda(lambda x: x),
             torchvision.transforms.ToTensor(),
-            torchvision.transforms.Normalize([0.5], [0.5]),
-        ]
-    )
+            torchvision.transforms.Normalize([0.5], [0.5]),])
 
-    def unwrap_model(model):
-        model = accelerator.unwrap_model(model)
-        model = model._orig_mod if diffusers.utils.torch_utils.is_compiled_module(model) else model
-        return model
-
-    def preprocess_train(examples):
-        images = [image.convert('RGB') for image in examples[image_column]]
-        examples['pixel_values'] = [train_transforms(image) for image in images]
-        examples['input_ids'] = tokenize_captions(examples)
-        return examples
+    # end-to-end preprocessing
+    __preprocess = functools.partial(
+        preprocess,
+        transforms=train_transforms,
+        image_column=image_column,
+        caption_column=caption_column)
 
     with accelerator.main_process_first():
         if args.max_samples:
             dataset = dataset.shuffle(seed=args.seed).select(range(args.max_samples))
         # Set the training transforms
-        train_dataset = dataset.with_transform(preprocess_train)
+        train_dataset = dataset.with_transform(__preprocess)
 
     def collate_fn(examples):
         pixel_values = torch.stack([example['pixel_values'] for example in examples])
@@ -529,7 +533,7 @@ def main():
                         save_path = os.path.join(args.output_dir, f'checkpoint-{global_step}')
                         accelerator.save_state(save_path)
 
-                        unwrapped_unet = unwrap_model(unet)
+                        unwrapped_unet = unwrap_model(accelerator, unet)
                         unet_lora_state_dict = diffusers.utils.convert_state_dict_to_diffusers(
                             peft.utils.get_peft_model_state_dict(unwrapped_unet)
                         )
@@ -553,7 +557,7 @@ def main():
                 # create pipeline
                 pipeline = diffusers.DiffusionPipeline.from_pretrained(
                     args.model_name,
-                    unet=unwrap_model(unet),
+                    unet=unwrap_model(accelerator, unet),
                     revision=args.revision,
                     variant=args.variant,
                     torch_dtype=weight_dtype,
@@ -568,7 +572,7 @@ def main():
     if accelerator.is_main_process:
         unet = unet.to(torch.float32)
 
-        unwrapped_unet = unwrap_model(unet)
+        unwrapped_unet = unwrap_model(accelerator, unet)
         unet_lora_state_dict = diffusers.utils.convert_state_dict_to_diffusers(peft.utils.get_peft_model_state_dict(unwrapped_unet))
         diffusers.StableDiffusionPipeline.save_lora_weights(
             save_directory=args.output_dir,
