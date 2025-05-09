@@ -35,7 +35,6 @@ import diffusers.utils.import_utils
 import diffusers.utils.torch_utils
 
 import densecurves.hilbert
-import mlable.utils
 
 logger = accelerate.logging.get_logger(__name__, log_level='INFO')
 
@@ -91,7 +90,7 @@ def tokenize_captions(captions, tokenizer):
 
 # PREPROCESSING ################################################################
 
-def preprocess(examples, transforms, image_column='image', caption_column='text'):
+def preprocess(examples, transforms, tokenizer, image_column='image', caption_column='text'):
     return {
         'pixel_values': [transforms(__i.convert('RGB')) for __i in examples[image_column]],
         'input_ids': tokenize_captions(examples[caption_column], tokenizer=tokenizer),}
@@ -311,6 +310,7 @@ def main():
     __preprocess = functools.partial(
         preprocess,
         transforms=train_transforms,
+        tokenizer=tokenizer,
         image_column=image_column,
         caption_column=caption_column)
 
