@@ -172,6 +172,12 @@ def preprocess(examples: dict, transforms: callable, tokenizer: callable, height
         'pixel_values': [transforms(__i) for __i in __images],
         'input_ids': __captions,}
 
+def collate_fn(examples: iter):
+    __input_ids = torch.stack([__e['input_ids'] for __e in examples])
+    __pixel_values = torch.stack([__e['pixel_values'] for __e in examples])
+    __pixel_values = __pixel_values.to(memory_format=torch.contiguous_format).float()
+    return {'pixel_values': __pixel_values, 'input_ids': __input_ids}
+
 # POSTPROCESSING ###############################################################
 
 # ARGS #########################################################################
@@ -252,11 +258,9 @@ def parse_args():
 def main():
     args = parse_args()
 
-    logging_dir = pathlib.Path(args.output_dir, args.logging_dir)
-
     accelerator_project_config = accelerate.utils.ProjectConfiguration(
         project_dir=args.output_dir,
-        logging_dir=logging_dir)
+        logging_dir=args.logging_dir)
 
     accelerator = accelerate.Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
@@ -280,6 +284,7 @@ def main():
 
     # create the output directory
     os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(args.logging_dir, exist_ok=True)
 
     # load scheduler, tokenizer and models
     noise_scheduler = diffusers.DDPMScheduler.from_pretrained(args.model_name, subfolder='scheduler')
@@ -396,12 +401,6 @@ def main():
             dataset = dataset.shuffle(seed=args.seed).select(range(args.max_samples))
         # Set the training transforms
         train_dataset = dataset.with_transform(__preprocess)
-
-    def collate_fn(examples):
-        pixel_values = torch.stack([example['pixel_values'] for example in examples])
-        pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
-        input_ids = torch.stack([example['input_ids'] for example in examples])
-        return {'pixel_values': pixel_values, 'input_ids': input_ids}
 
     # DataLoaders creation:
     train_dataloader = torch.utils.data.DataLoader(
