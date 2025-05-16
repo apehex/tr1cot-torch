@@ -86,7 +86,7 @@ def chunk(seq: list, size: int, repeats: bool=True) -> list:
     __chunks = (seq[__i:__i + size] for __i in range(0, len(seq), size))
     return list(__chunks if repeats else set(__chunks))
 
-def split(text: str, height: int=64, width: int=64, separator: str='\n') -> list:
+def split(text: str, height: int=-1, width: int=-1, separator: str='\n') -> list:
     # typically split on \n or at a fixed size
     __rows = text.split(separator) if separator else chunk(text, width)
     # :width would leave one character out when width == -1
@@ -96,7 +96,7 @@ def split(text: str, height: int=64, width: int=64, separator: str='\n') -> list
     # enforce the maximum dimensions
     return [__r[__width] for __r in __rows[__height] if __r]
 
-def pad(rows: list, height: int=64, width: int=64, value: str='\x00') -> list:
+def pad(rows: list, height: int=-1, width: int=-1, value: str='\x00') -> list:
     return [__r + (width - len(__r)) * value for __r in rows] + (height - len(rows)) * [width * value]
 
 # RGB ENCODING #################################################################
@@ -129,7 +129,7 @@ def rgb_hilbert(rows: list) -> np.ndarray:
 
 # IMAGES #######################################################################
 
-def preprocess_images(examples: dict, height: int=64, width: int=64, encoder: callable=rgb_utf) -> list:
+def preprocess_images(examples: dict, height: int=-1, width: int=-1, encoder: callable=rgb_utf) -> list:
     # split the ASCII art string line by line
     __data = [split(__d, height=height, width=width, separator='\n') for __d in examples['content']]
     # pad with null codepoints (=> null channels) to full height x width
@@ -162,7 +162,7 @@ def preprocess_captions(examples: dict, tokenizer: callable) -> list:
 
 # PREPROCESSING ################################################################
 
-def preprocess(examples: dict, transforms: callable, tokenizer: callable, encoder: callable=rgb_utf, height: int=64, width: int=64):
+def preprocess(examples: dict, transforms: callable, tokenizer: callable, encoder: callable=rgb_utf, height: int=-1, width: int=-1):
     # use UTF-32 encoding to interpret text as RGB data
     __images = preprocess_images(examples=examples, height=height, width=width, encoder=encoder)
     # specify both the ASCII art content and its style
@@ -194,7 +194,7 @@ def parse_args():
     # dataset config
     parser.add_argument('--dataset_name', type=str, default='apehex/ascii-art-datacompdr-12m', required=False, help='The name of the Dataset (from the HuggingFace hub) to train on.')
     parser.add_argument('--dataset_config', type=str, default='default', required=False, help='The config of the Dataset, leave as None if there\'s only one config.')
-    parser.add_argument('--dataset_split', type=str, default='fixed', required=False, help='The split of the Dataset.')
+    parser.add_argument('--dataset_split', type=str, default='train', required=False, help='The split of the Dataset.')
     parser.add_argument('--dataset_dir', type=str, default=None, required=False, help='A folder containing the training data.')
     parser.add_argument('--image_column', type=str, default='content', required=False, help='The column of the dataset containing an image.')
     parser.add_argument('--caption_column', type=str, default='caption', required=False, help='The column of the dataset containing a caption or a list of captions.')
@@ -394,8 +394,8 @@ def main():
         transforms=train_transforms,
         tokenizer=tokenizer,
         encoder=rgb_utf,
-        height=64,
-        width=64)
+        height=-1,
+        width=-1)
 
     with accelerator.main_process_first():
         if args.max_samples:
