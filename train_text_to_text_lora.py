@@ -8,6 +8,7 @@ import math
 import os
 import pathlib
 import random
+import re
 import shutil
 
 import PIL
@@ -80,6 +81,13 @@ def unwrap_model(accelerator, model):
     __model = accelerator.unwrap_model(model)
     return __model._orig_mod if diffusers.utils.torch_utils.is_compiled_module(__model) else __model
 
+# CLEAN ########################################################################
+
+ANSI_REGEX = r'\x1b\[[0-9;]*[mGKHF]'
+
+def clean(text: str, pattern: str=ANSI_REGEX, rewrite: str='') -> str:
+    return re.sub(pattern=pattern, repl=rewrite, string=text)
+
 # 1D => 2D #####################################################################
 
 def chunk(seq: list, size: int, repeats: bool=True) -> list:
@@ -130,8 +138,10 @@ def rgb_hilbert(rows: list) -> np.ndarray:
 # IMAGES #######################################################################
 
 def preprocess_images(examples: dict, height: int=-1, width: int=-1, encoder: callable=rgb_utf) -> list:
+    # remove ANSI color codes
+    __data = [clean(__d) for __d in examples['content']]
     # split the ASCII art string line by line
-    __data = [split(__d, height=height, width=width, separator='\n') for __d in examples['content']]
+    __data = [split(__d, height=height, width=width, separator='\n') for __d in __data]
     # pad with null codepoints (=> null channels) to full height x width
     __data = [pad(__d, height=height, width=width, value='\x00') for __d in __data]
     # encode as rgb
@@ -144,7 +154,8 @@ def preprocess_images(examples: dict, height: int=-1, width: int=-1, encoder: ca
 def compose_caption(description: str, labels: str) -> str:
     __options = labels.replace(
         'braille', 'braille characters').replace(
-        'color', 'ANSI color codes').replace(
+        'grayscale,', '').replace(
+        'color,', '').replace(
         'negative', 'negative colors')
     return '{description} in ASCII art with {options}'.format(description=description, options=__options)
 
