@@ -154,6 +154,7 @@ def preprocess_images(examples: dict, height: int=-1, width: int=-1, encoder: ca
 def compose_caption(description: str, labels: str) -> str:
     __options = labels.replace(
         'braille', 'braille characters').replace(
+        'complex', 'characters from a wide range').replace(
         'grayscale,', '').replace(
         'color,', '').replace(
         'negative', 'negative colors')
