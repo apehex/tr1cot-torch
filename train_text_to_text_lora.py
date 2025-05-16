@@ -101,7 +101,7 @@ def pad(rows: list, height: int=64, width: int=64, value: str='\x00') -> list:
 
 # RGB ENCODING #################################################################
 
-def rgb(rows: list) -> np.ndarray:
+def rgb_utf(rows: list) -> np.ndarray:
     __height, __width = len(rows), len(rows[0])
     # each character is encoded as 4 bytes
     __rows = [list(__r.encode('utf-32-be')) for __r in rows]
@@ -118,7 +118,7 @@ def mix_channels(channels: np.ndarray) -> np.ndarray:
     return np.mod(__mix, __mod)
 
 def rgb_mixed(rows: list) -> np.ndarray:
-    return np.apply_along_axis(mix_channels, arr=rgb(rows).astype(np.int32), axis=-1)
+    return np.apply_along_axis(mix_channels, arr=rgb_utf(rows).astype(np.int32), axis=-1)
 
 def rgb_hilbert(rows: list) -> np.ndarray:
     __height, __width = len(rows), len(rows[0])
@@ -129,13 +129,13 @@ def rgb_hilbert(rows: list) -> np.ndarray:
 
 # IMAGES #######################################################################
 
-def preprocess_images(examples: dict, height: int=64, width: int=64) -> list:
+def preprocess_images(examples: dict, height: int=64, width: int=64, encoder: callable=rgb_utf) -> list:
     # split the ASCII art string line by line
     __data = [split(__d, height=height, width=width, separator='\n') for __d in examples['content']]
     # pad with null codepoints (=> null channels) to full height x width
     __data = [pad(__d, height=height, width=width, value='\x00') for __d in __data]
     # encode as rgb
-    __data = [rgb(__d) for __d in __data]
+    __data = [encoder(__d) for __d in __data]
     # format as pillow image
     return [PIL.Image.fromarray(__d, mode='RGB') for __d in __data]
 
@@ -162,9 +162,9 @@ def preprocess_captions(examples: dict, tokenizer: callable) -> list:
 
 # PREPROCESSING ################################################################
 
-def preprocess(examples: dict, transforms: callable, tokenizer: callable, height: int=64, width: int=64):
+def preprocess(examples: dict, transforms: callable, tokenizer: callable, encoder: callable=rgb_utf, height: int=64, width: int=64):
     # use UTF-32 encoding to interpret text as RGB data
-    __images = preprocess_images(examples=examples, height=height, width=width)
+    __images = preprocess_images(examples=examples, height=height, width=width, encoder=encoder)
     # specify both the ASCII art content and its style
     __captions = preprocess_captions(examples=examples, tokenizer=tokenizer)
     # apply image transformations (resize, crop, etc)
@@ -393,6 +393,7 @@ def main():
         preprocess,
         transforms=train_transforms,
         tokenizer=tokenizer,
+        encoder=rgb_utf,
         height=64,
         width=64)
 
