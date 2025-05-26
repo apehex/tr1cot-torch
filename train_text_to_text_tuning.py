@@ -1,18 +1,4 @@
-#!/usr/bin/env python
-# coding=utf-8
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+'''Fine-tuning script for Stable Diffusion on text-to-text tasks.'''
 
 import argparse
 import logging
@@ -20,128 +6,41 @@ import math
 import os
 import random
 import shutil
-from contextlib import nullcontext
-from pathlib import Path
 
-import accelerate
 import datasets
 import numpy as np
+import tqdm.auto
+
 import torch
-import torch.nn.functional as F
+import torch.nn.functional
 import torch.utils.checkpoint
+import torchvision
+
 import transformers
-from accelerate import Accelerator
-from accelerate.logging import get_logger
-from accelerate.state import AcceleratorState
-from accelerate.utils import ProjectConfiguration, set_seed
-from datasets import load_dataset
-from huggingface_hub import create_repo, upload_folder
-from packaging import version
-from torchvision import transforms
-from tqdm.auto import tqdm
-from transformers import CLIPTextModel, CLIPTokenizer
-from transformers.utils import ContextManagers
+import transformers.utils
 
 import diffusers
-from diffusers import AutoencoderKL, DDPMScheduler, StableDiffusionPipeline, UNet2DConditionModel
-from diffusers.optimization import get_scheduler
-from diffusers.training_utils import EMAModel, compute_dream_and_update_latents, compute_snr
-from diffusers.utils import check_min_version, deprecate, is_wandb_available, make_image_grid
-from diffusers.utils.hub_utils import load_or_create_model_card, populate_model_card
-from diffusers.utils.import_utils import is_xformers_available
-from diffusers.utils.torch_utils import is_compiled_module
+import diffusers.optimization
+import diffusers.training_utils
+import diffusers.utils.torch_utils
 
+import accelerate
+import accelerate.logging
+import accelerate.state
+import accelerate.utils
 
-if is_wandb_available():
-    import wandb
+# CONSTANTS ####################################################################
 
+DATASET_NAME_MAPPING = {"lambdalabs/naruto-blip-captions": ("image", "text"),}
 
-# Will error if the minimal version of diffusers is not installed. Remove at your own risks.
-check_min_version("0.34.0.dev0")
+# VALIDATION ###################################################################
 
-logger = get_logger(__name__, log_level="INFO")
-
-DATASET_NAME_MAPPING = {
-    "lambdalabs/naruto-blip-captions": ("image", "text"),
-}
-
-
-def save_model_card(
-    args,
-    repo_id: str,
-    images: list = None,
-    repo_folder: str = None,
-):
-    img_str = ""
-    if len(images) > 0:
-        image_grid = make_image_grid(images, 1, len(args.validation_prompts))
-        image_grid.save(os.path.join(repo_folder, "val_imgs_grid.png"))
-        img_str += "![val_imgs_grid](./val_imgs_grid.png)\n"
-
-    model_description = f"""
-# Text-to-image finetuning - {repo_id}
-
-This pipeline was finetuned from **{args.pretrained_model_name_or_path}** on the **{args.dataset_name}** dataset. Below are some example images generated with the finetuned pipeline using the following prompts: {args.validation_prompts}: \n
-{img_str}
-
-## Pipeline usage
-
-You can use the pipeline like so:
-
-```python
-from diffusers import DiffusionPipeline
-import torch
-
-pipeline = DiffusionPipeline.from_pretrained("{repo_id}", torch_dtype=torch.float16)
-prompt = "{args.validation_prompts[0]}"
-image = pipeline(prompt).images[0]
-image.save("my_image.png")
-```
-
-## Training info
-
-These are the key hyperparameters used during training:
-
-* Epochs: {args.num_train_epochs}
-* Learning rate: {args.learning_rate}
-* Batch size: {args.train_batch_size}
-* Gradient accumulation steps: {args.gradient_accumulation_steps}
-* Image resolution: {args.resolution}
-* Mixed-precision: {args.mixed_precision}
-
-"""
-    wandb_info = ""
-    if is_wandb_available():
-        wandb_run_url = None
-        if wandb.run is not None:
-            wandb_run_url = wandb.run.url
-
-    if wandb_run_url is not None:
-        wandb_info = f"""
-More information on all the CLI arguments and the environment are available on your [`wandb` run page]({wandb_run_url}).
-"""
-
-    model_description += wandb_info
-
-    model_card = load_or_create_model_card(
-        repo_id_or_path=repo_id,
-        from_training=True,
-        license="creativeml-openrail-m",
-        base_model=args.pretrained_model_name_or_path,
-        model_description=model_description,
-        inference=True,
-    )
-
-    tags = ["stable-diffusion", "stable-diffusion-diffusers", "text-to-image", "diffusers", "diffusers-training"]
-    model_card = populate_model_card(model_card, tags=tags)
-
-    model_card.save(os.path.join(repo_folder, "README.md"))
-
+logger = accelerate.logging.get_logger(__name__, log_level="INFO")
 
 def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight_dtype, epoch):
     logger.info("Running validation... ")
 
-    pipeline = StableDiffusionPipeline.from_pretrained(
+    pipeline = diffusers.StableDiffusionPipeline.from_pretrained(
         args.pretrained_model_name_or_path,
         vae=accelerator.unwrap_model(vae),
         text_encoder=accelerator.unwrap_model(text_encoder),
@@ -165,12 +64,7 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
 
     images = []
     for i in range(len(args.validation_prompts)):
-        if torch.backends.mps.is_available():
-            autocast_ctx = nullcontext()
-        else:
-            autocast_ctx = torch.autocast(accelerator.device.type)
-
-        with autocast_ctx:
+        with torch.autocast(accelerator.device.type):
             image = pipeline(args.validation_prompts[i], num_inference_steps=20, generator=generator).images[0]
 
         images.append(image)
@@ -179,15 +73,6 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
         if tracker.name == "tensorboard":
             np_images = np.stack([np.asarray(img) for img in images])
             tracker.writer.add_images("validation", np_images, epoch, dataformats="NHWC")
-        elif tracker.name == "wandb":
-            tracker.log(
-                {
-                    "validation": [
-                        wandb.Image(image, caption=f"{i}: {args.validation_prompts[i]}")
-                        for i, image in enumerate(images)
-                    ]
-                }
-            )
         else:
             logger.warning(f"image logging not implemented for {tracker.name}")
 
@@ -196,6 +81,7 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
 
     return images
 
+# ARGS #########################################################################
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
@@ -271,7 +157,7 @@ def parse_args():
         type=str,
         default=None,
         nargs="+",
-        help=("A set of prompts evaluated every `--validation_epochs` and logged to `--report_to`."),
+        help=("A set of prompts evaluated every `--validation_epochs` and logged to tensorboard."),
     )
     parser.add_argument(
         "--output_dir",
@@ -390,16 +276,6 @@ def parse_args():
     parser.add_argument("--offload_ema", action="store_true", help="Offload EMA model to CPU during training step.")
     parser.add_argument("--foreach_ema", action="store_true", help="Use faster foreach implementation of EMAModel.")
     parser.add_argument(
-        "--non_ema_revision",
-        type=str,
-        default=None,
-        required=False,
-        help=(
-            "Revision of pretrained non-ema model identifier. Must be a branch, tag or git identifier of the local or"
-            " remote repository specified with --pretrained_model_name_or_path."
-        ),
-    )
-    parser.add_argument(
         "--dataloader_num_workers",
         type=int,
         default=0,
@@ -412,8 +288,6 @@ def parse_args():
     parser.add_argument("--adam_weight_decay", type=float, default=1e-2, help="Weight decay to use.")
     parser.add_argument("--adam_epsilon", type=float, default=1e-08, help="Epsilon value for the Adam optimizer")
     parser.add_argument("--max_grad_norm", default=1.0, type=float, help="Max gradient norm.")
-    parser.add_argument("--push_to_hub", action="store_true", help="Whether or not to push the model to the Hub.")
-    parser.add_argument("--hub_token", type=str, default=None, help="The token to use to push to the Model Hub.")
     parser.add_argument(
         "--prediction_type",
         type=str,
@@ -444,15 +318,6 @@ def parse_args():
             "Whether to use mixed precision. Choose between fp16 and bf16 (bfloat16). Bf16 requires PyTorch >="
             " 1.10.and an Nvidia Ampere GPU.  Default to the value of accelerate config of the current system or the"
             " flag passed with the `accelerate.launch` command. Use this argument to override the accelerate config."
-        ),
-    )
-    parser.add_argument(
-        "--report_to",
-        type=str,
-        default="tensorboard",
-        help=(
-            'The integration to report the results and logs to. Supported platforms are `"tensorboard"`'
-            ' (default), `"wandb"` and `"comet_ml"`. Use `"all"` to report to all integrations.'
         ),
     )
     parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
@@ -504,7 +369,7 @@ def parse_args():
         type=str,
         default="lanczos",
         choices=[
-            f.lower() for f in dir(transforms.InterpolationMode) if not f.startswith("__") and not f.endswith("__")
+            f.lower() for f in dir(torchvision.transforms.InterpolationMode) if not f.startswith("__") and not f.endswith("__")
         ],
         help="The image interpolation method to use for resizing images.",
     )
@@ -518,45 +383,22 @@ def parse_args():
     if args.dataset_name is None and args.train_data_dir is None:
         raise ValueError("Need either a dataset name or a training folder.")
 
-    # default to using the same revision for the non-ema model if not specified
-    if args.non_ema_revision is None:
-        args.non_ema_revision = args.revision
-
     return args
 
 
 def main():
     args = parse_args()
 
-    if args.report_to == "wandb" and args.hub_token is not None:
-        raise ValueError(
-            "You cannot use both --report_to=wandb and --hub_token due to a security risk of exposing your token."
-            " Please use `huggingface-cli login` to authenticate with the Hub."
-        )
-
-    if args.non_ema_revision is not None:
-        deprecate(
-            "non_ema_revision!=None",
-            "0.15.0",
-            message=(
-                "Downloading 'non_ema' weights from revision branches of the Hub is deprecated. Please make sure to"
-                " use `--variant=non_ema` instead."
-            ),
-        )
     logging_dir = os.path.join(args.output_dir, args.logging_dir)
 
-    accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
+    accelerator_project_config = accelerate.utils.ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
 
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
-        log_with=args.report_to,
+        log_with='tensorboard',
         project_config=accelerator_project_config,
     )
-
-    # Disable AMP for MPS.
-    if torch.backends.mps.is_available():
-        accelerator.native_amp = False
 
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
@@ -576,21 +418,16 @@ def main():
 
     # If passed along, set the training seed now.
     if args.seed is not None:
-        set_seed(args.seed)
+        accelerate.utils.set_seed(args.seed)
 
     # Handle the repository creation
     if accelerator.is_main_process:
         if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
 
-        if args.push_to_hub:
-            repo_id = create_repo(
-                repo_id=args.hub_model_id or Path(args.output_dir).name, exist_ok=True, token=args.hub_token
-            ).repo_id
-
     # Load scheduler, tokenizer and models.
-    noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
-    tokenizer = CLIPTokenizer.from_pretrained(
+    noise_scheduler = diffusers.DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
+    tokenizer = transformers.CLIPTokenizer.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="tokenizer", revision=args.revision
     )
 
@@ -598,7 +435,7 @@ def main():
         """
         returns either a context list that includes one that will disable zero.Init or an empty context list
         """
-        deepspeed_plugin = AcceleratorState().deepspeed_plugin if accelerate.state.is_initialized() else None
+        deepspeed_plugin = accelerate.state.AcceleratorState().deepspeed_plugin if accelerate.state.is_initialized() else None
         if deepspeed_plugin is None:
             return []
 
@@ -613,16 +450,16 @@ def main():
     # frozen models from being partitioned during `zero.Init` which gets called during
     # `from_pretrained` So CLIPTextModel and AutoencoderKL will not enjoy the parameter sharding
     # across multiple gpus and only UNet2DConditionModel will get ZeRO sharded.
-    with ContextManagers(deepspeed_zero_init_disabled_context_manager()):
-        text_encoder = CLIPTextModel.from_pretrained(
+    with transformers.utils.ContextManagers(deepspeed_zero_init_disabled_context_manager()):
+        text_encoder = transformers.CLIPTextModel.from_pretrained(
             args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
         )
-        vae = AutoencoderKL.from_pretrained(
+        vae = diffusers.AutoencoderKL.from_pretrained(
             args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision, variant=args.variant
         )
 
-    unet = UNet2DConditionModel.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="unet", revision=args.non_ema_revision
+    unet = diffusers.UNet2DConditionModel.from_pretrained(
+        args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision
     )
 
     # Freeze vae and text_encoder and set unet to trainable
@@ -632,68 +469,57 @@ def main():
 
     # Create EMA for the unet.
     if args.use_ema:
-        ema_unet = UNet2DConditionModel.from_pretrained(
+        ema_unet = diffusers.UNet2DConditionModel.from_pretrained(
             args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision, variant=args.variant
         )
-        ema_unet = EMAModel(
+        ema_unet = diffusers.training_utils.EMAModel(
             ema_unet.parameters(),
-            model_cls=UNet2DConditionModel,
+            model_cls=diffusers.UNet2DConditionModel,
             model_config=ema_unet.config,
             foreach=args.foreach_ema,
         )
 
     if args.enable_xformers_memory_efficient_attention:
-        if is_xformers_available():
-            import xformers
+        import xformers
+        unet.enable_xformers_memory_efficient_attention()
 
-            xformers_version = version.parse(xformers.__version__)
-            if xformers_version == version.parse("0.0.16"):
-                logger.warning(
-                    "xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details."
-                )
-            unet.enable_xformers_memory_efficient_attention()
-        else:
-            raise ValueError("xformers is not available. Make sure it is installed correctly")
-
-    # `accelerate` 0.16.0 will have better support for customized saving
-    if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
-        # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
-        def save_model_hook(models, weights, output_dir):
-            if accelerator.is_main_process:
-                if args.use_ema:
-                    ema_unet.save_pretrained(os.path.join(output_dir, "unet_ema"))
-
-                for i, model in enumerate(models):
-                    model.save_pretrained(os.path.join(output_dir, "unet"))
-
-                    # make sure to pop weight so that corresponding model is not saved again
-                    weights.pop()
-
-        def load_model_hook(models, input_dir):
+    # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
+    def save_model_hook(models, weights, output_dir):
+        if accelerator.is_main_process:
             if args.use_ema:
-                load_model = EMAModel.from_pretrained(
-                    os.path.join(input_dir, "unet_ema"), UNet2DConditionModel, foreach=args.foreach_ema
-                )
-                ema_unet.load_state_dict(load_model.state_dict())
-                if args.offload_ema:
-                    ema_unet.pin_memory()
-                else:
-                    ema_unet.to(accelerator.device)
-                del load_model
+                ema_unet.save_pretrained(os.path.join(output_dir, "unet_ema"))
 
-            for _ in range(len(models)):
-                # pop models so that they are not loaded again
-                model = models.pop()
+            for i, model in enumerate(models):
+                model.save_pretrained(os.path.join(output_dir, "unet"))
 
-                # load diffusers style into model
-                load_model = UNet2DConditionModel.from_pretrained(input_dir, subfolder="unet")
-                model.register_to_config(**load_model.config)
+                # make sure to pop weight so that corresponding model is not saved again
+                weights.pop()
 
-                model.load_state_dict(load_model.state_dict())
-                del load_model
+    def load_model_hook(models, input_dir):
+        if args.use_ema:
+            load_model = diffusers.training_utils.EMAModel.from_pretrained(
+                os.path.join(input_dir, "unet_ema"), diffusers.UNet2DConditionModel, foreach=args.foreach_ema
+            )
+            ema_unet.load_state_dict(load_model.state_dict())
+            if args.offload_ema:
+                ema_unet.pin_memory()
+            else:
+                ema_unet.to(accelerator.device)
+            del load_model
 
-        accelerator.register_save_state_pre_hook(save_model_hook)
-        accelerator.register_load_state_pre_hook(load_model_hook)
+        for _ in range(len(models)):
+            # pop models so that they are not loaded again
+            model = models.pop()
+
+            # load diffusers style into model
+            load_model = diffusers.UNet2DConditionModel.from_pretrained(input_dir, subfolder="unet")
+            model.register_to_config(**load_model.config)
+
+            model.load_state_dict(load_model.state_dict())
+            del load_model
+
+    accelerator.register_save_state_pre_hook(save_model_hook)
+    accelerator.register_load_state_pre_hook(load_model_hook)
 
     if args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
@@ -736,7 +562,7 @@ def main():
     # download the dataset.
     if args.dataset_name is not None:
         # Downloading and loading a dataset from the hub.
-        dataset = load_dataset(
+        dataset = datasets.load_dataset(
             args.dataset_name,
             args.dataset_config_name,
             cache_dir=args.cache_dir,
@@ -746,7 +572,7 @@ def main():
         data_files = {}
         if args.train_data_dir is not None:
             data_files["train"] = os.path.join(args.train_data_dir, "**")
-        dataset = load_dataset(
+        dataset = datasets.load_dataset(
             "imagefolder",
             data_files=data_files,
             cache_dir=args.cache_dir,
@@ -797,20 +623,20 @@ def main():
         return inputs.input_ids
 
     # Get the specified interpolation method from the args
-    interpolation = getattr(transforms.InterpolationMode, args.image_interpolation_mode.upper(), None)
+    interpolation = getattr(torchvision.transforms.InterpolationMode, args.image_interpolation_mode.upper(), None)
 
     # Raise an error if the interpolation method is invalid
     if interpolation is None:
         raise ValueError(f"Unsupported interpolation mode {args.image_interpolation_mode}.")
 
     # Data preprocessing transformations
-    train_transforms = transforms.Compose(
+    train_transforms = torchvision.transforms.Compose(
         [
-            transforms.Resize(args.resolution, interpolation=interpolation),  # Use dynamic interpolation method
-            transforms.CenterCrop(args.resolution) if args.center_crop else transforms.RandomCrop(args.resolution),
-            transforms.RandomHorizontalFlip() if args.random_flip else transforms.Lambda(lambda x: x),
-            transforms.ToTensor(),
-            transforms.Normalize([0.5], [0.5]),
+            torchvision.transforms.Resize(args.resolution, interpolation=interpolation),  # Use dynamic interpolation method
+            torchvision.transforms.CenterCrop(args.resolution) if args.center_crop else torchvision.transforms.RandomCrop(args.resolution),
+            torchvision.transforms.RandomHorizontalFlip() if args.random_flip else torchvision.transforms.Lambda(lambda x: x),
+            torchvision.transforms.ToTensor(),
+            torchvision.transforms.Normalize([0.5], [0.5]),
         ]
     )
 
@@ -853,7 +679,7 @@ def main():
     else:
         num_training_steps_for_scheduler = args.max_train_steps * accelerator.num_processes
 
-    lr_scheduler = get_scheduler(
+    lr_scheduler = diffusers.optimization.get_scheduler(
         args.lr_scheduler,
         optimizer=optimizer,
         num_warmup_steps=num_warmup_steps_for_scheduler,
@@ -908,7 +734,7 @@ def main():
     # Function for unwrapping if model was compiled with `torch.compile`.
     def unwrap_model(model):
         model = accelerator.unwrap_model(model)
-        model = model._orig_mod if is_compiled_module(model) else model
+        model = model._orig_mod if diffusers.utils.torch_utils.is_compiled_module(model) else model
         return model
 
     # Train!
@@ -952,7 +778,7 @@ def main():
     else:
         initial_global_step = 0
 
-    progress_bar = tqdm(
+    progress_bar = tqdm.auto.tqdm(
         range(0, args.max_train_steps),
         initial=initial_global_step,
         desc="Steps",
@@ -1005,7 +831,7 @@ def main():
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
                 if args.dream_training:
-                    noisy_latents, target = compute_dream_and_update_latents(
+                    noisy_latents, target = diffusers.training_utils.compute_dream_and_update_latents(
                         unet,
                         noise_scheduler,
                         timesteps,
@@ -1020,12 +846,12 @@ def main():
                 model_pred = unet(noisy_latents, timesteps, encoder_hidden_states, return_dict=False)[0]
 
                 if args.snr_gamma is None:
-                    loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+                    loss = torch.nn.functional.mse_loss(model_pred.float(), target.float(), reduction="mean")
                 else:
                     # Compute loss-weights as per Section 3.4 of https://arxiv.org/abs/2303.09556.
                     # Since we predict the noise instead of x_0, the original formulation is slightly changed.
                     # This is discussed in Section 4.2 of the same paper.
-                    snr = compute_snr(noise_scheduler, timesteps)
+                    snr = diffusers.training_utils.compute_snr(noise_scheduler, timesteps)
                     mse_loss_weights = torch.stack([snr, args.snr_gamma * torch.ones_like(timesteps)], dim=1).min(
                         dim=1
                     )[0]
@@ -1034,7 +860,7 @@ def main():
                     elif noise_scheduler.config.prediction_type == "v_prediction":
                         mse_loss_weights = mse_loss_weights / (snr + 1)
 
-                    loss = F.mse_loss(model_pred.float(), target.float(), reduction="none")
+                    loss = torch.nn.functional.mse_loss(model_pred.float(), target.float(), reduction="none")
                     loss = loss.mean(dim=list(range(1, len(loss.shape)))) * mse_loss_weights
                     loss = loss.mean()
 
@@ -1122,7 +948,7 @@ def main():
         if args.use_ema:
             ema_unet.copy_to(unet.parameters())
 
-        pipeline = StableDiffusionPipeline.from_pretrained(
+        pipeline = diffusers.StableDiffusionPipeline.from_pretrained(
             args.pretrained_model_name_or_path,
             text_encoder=text_encoder,
             vae=vae,
@@ -1152,15 +978,6 @@ def main():
                 with torch.autocast("cuda"):
                     image = pipeline(args.validation_prompts[i], num_inference_steps=20, generator=generator).images[0]
                 images.append(image)
-
-        if args.push_to_hub:
-            save_model_card(args, repo_id, images, repo_folder=args.output_dir)
-            upload_folder(
-                repo_id=repo_id,
-                folder_path=args.output_dir,
-                commit_message="End of training",
-                ignore_patterns=["step_*", "epoch_*"],
-            )
 
     accelerator.end_training()
 
