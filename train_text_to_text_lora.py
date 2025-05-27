@@ -211,6 +211,11 @@ def parse_args():
     parser.add_argument('--image_column', type=str, default='content', required=False, help='The column of the dataset containing an image.')
     parser.add_argument('--caption_column', type=str, default='caption', required=False, help='The column of the dataset containing a caption or a list of captions.')
     parser.add_argument('--max_samples', type=int, default=0, required=False, help='Truncate the number of training examples to this value if set.')
+    # preprocessing config
+    parser.add_argument('--resolution', type=int, default=512, required=False, help='The resolution for input images.')
+    parser.add_argument('--center_crop', default=False, required=False, action='store_true', help='Whether to center (instead of random) crop the input images to the resolution.')
+    parser.add_argument('--random_flip', default=False, required=False, action='store_true', help='whether to randomly flip images horizontally.')
+    parser.add_argument('--image_interpolation_mode', type=str, default='lanczos', choices=[__f.lower() for __f in dir(torchvision.transforms.InterpolationMode) if not __f.startswith('__') and not __f.endswith('__')], required=False, help='The image interpolation method to use for resizing images.')
     # output config
     parser.add_argument('--output_dir', type=str, default='lora-model', required=False, help='The output directory where the model predictions and checkpoints will be written.')
     parser.add_argument('--cache_dir', type=str, default=None, required=False, help='The directory where the downloaded models and datasets will be stored.')
@@ -227,11 +232,6 @@ def parse_args():
     parser.add_argument('--validation_prompt', type=str, default='', required=False, help='A prompt that is sampled during training for inference.')
     parser.add_argument('--num_validation_images', type=int, default=4, required=False, help='Number of images that should be generated during validation with `validation_prompt`.')
     parser.add_argument('--validation_epochs', type=int, default=1, required=False, help='Run fine-tuning validation every X epochs.')
-    # preprocessing config
-    parser.add_argument('--resolution', type=int, default=512, required=False, help='The resolution for input images.')
-    parser.add_argument('--center_crop', default=False, required=False, action='store_true', help='Whether to center (instead of random) crop the input images to the resolution.')
-    parser.add_argument('--random_flip', default=False, required=False, action='store_true', help='whether to randomly flip images horizontally.')
-    parser.add_argument('--image_interpolation_mode', type=str, default='lanczos', choices=[f.lower() for f in dir(torchvision.transforms.InterpolationMode) if not f.startswith('__') and not f.endswith('__')], required=False, help='The image interpolation method to use for resizing images.')
     # gradient config
     parser.add_argument('--gradient_accumulation_steps', type=int, default=1, required=False, help='Number of updates steps to accumulate before performing a backward/update pass.')
     parser.add_argument('--gradient_checkpointing', default=False, required=False, action='store_true', help='Whether or not to use gradient checkpointing to save memory at the expense of slower backward pass.')
@@ -260,10 +260,8 @@ def parse_args():
     # diffusion config
     parser.add_argument('--prediction_type', type=str, default='epsilon', required=False, help='The prediction type, among "epsilon", "v_prediction" or `None`.')
     parser.add_argument('--noise_offset', type=float, default=0.0, required=False, help='The scale of noise offset.')
-
-    args = parser.parse_args()
-
-    return args
+    # actually process the CLI inputs
+    return parser.parse_args()
 
 # MAIN #########################################################################
 
