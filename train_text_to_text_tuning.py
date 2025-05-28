@@ -1,6 +1,7 @@
 '''Fine-tuning script for Stable Diffusion on text-to-text tasks.'''
 
 import argparse
+import functools
 import logging
 import math
 import os
@@ -31,21 +32,21 @@ import accelerate.utils
 
 # CONSTANTS ####################################################################
 
-DATASET_NAME_MAPPING = {"lambdalabs/naruto-blip-captions": ("image", "text"),}
+DATASET_NAME_MAPPING = {'lambdalabs/naruto-blip-captions': ('image', 'text'),}
 
 # VALIDATION ###################################################################
 
-logger = accelerate.logging.get_logger(__name__, log_level="INFO")
+logger = accelerate.logging.get_logger(__name__, log_level='INFO')
 
 def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight_dtype, epoch):
-    logger.info("Running validation... ")
+    logger.info('Running validation... ')
 
     pipeline = diffusers.StableDiffusionPipeline.from_pretrained(
         args.model_name,
-        vae=accelerator.unwrap_model(vae),
-        text_encoder=accelerator.unwrap_model(text_encoder),
+        vae=accelerator.unwrap_model(accelerator, vae),
+        text_encoder=accelerator.unwrap_model(accelerator, text_encoder),
         tokenizer=tokenizer,
-        unet=accelerator.unwrap_model(unet),
+        unet=accelerator.unwrap_model(accelerator, unet),
         safety_checker=None,
         revision=args.revision,
         variant=args.variant,
@@ -67,33 +68,112 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
         images.append(image)
 
     for tracker in accelerator.trackers:
-        if tracker.name == "tensorboard":
+        if tracker.name == 'tensorboard':
             np_images = np.stack([np.asarray(img) for img in images])
-            tracker.writer.add_images("validation", np_images, epoch, dataformats="NHWC")
+            tracker.writer.add_images('validation', np_images, epoch, dataformats='NHWC')
         else:
-            logger.warning(f"image logging not implemented for {tracker.name}")
+            logger.warning(f'image logging not implemented for {tracker.name}')
 
     del pipeline
     torch.cuda.empty_cache()
 
     return images
 
+# MODEL ########################################################################
+
+def unwrap_model(accelerator, model):
+    __model = accelerator.unwrap_model(model)
+    return __model._orig_mod if diffusers.utils.torch_utils.is_compiled_module(__model) else __model
+
+# DEEPSPEED ####################################################################
+
+def deepspeed_zero_init_disabled_context_manager():
+    deepspeed_plugins = [accelerate.state.AcceleratorState().deepspeed_plugin] if accelerate.state.is_initialized() else []
+    # disable zero.Init
+    return [__p.zero3_init_context_manager(enable=False) for __p in deepspeed_plugins]
+
+# IO HOOKS #####################################################################
+
+def save_model_hook(models, weights, output_dir, ema_model, accelerator, args):
+    if accelerator.is_main_process:
+        if args.use_ema:
+            ema_model.save_pretrained(os.path.join(output_dir, 'unet_ema'))
+
+        for i, model in enumerate(models):
+            model.save_pretrained(os.path.join(output_dir, 'unet'))
+            # make sure to pop weight so that corresponding model is not saved again
+            weights.pop()
+
+def load_model_hook(models, input_dir, ema_model, accelerator, args):
+    if args.use_ema:
+        load_model = diffusers.training_utils.EMAModel.from_pretrained(
+            os.path.join(input_dir, 'unet_ema'), diffusers.UNet2DConditionModel, foreach=args.foreach_ema
+        )
+        ema_model.load_state_dict(load_model.state_dict())
+        if args.offload_ema:
+            ema_model.pin_memory()
+        else:
+            ema_model.to(accelerator.device)
+        # cleanup
+        del load_model
+
+    for _ in range(len(models)):
+        # pop models so that they are not loaded again
+        model = models.pop()
+        # load diffusers style into model
+        load_model = diffusers.UNet2DConditionModel.from_pretrained(input_dir, subfolder='unet')
+        model.register_to_config(**load_model.config)
+        model.load_state_dict(load_model.state_dict())
+        # cleanup
+        del load_model
+
+# IMAGES #######################################################################
+
+def preprocess_images(examples: dict, transforms: callable, image_column: str='image') -> list:
+    return [transforms(__i.convert("RGB")) for __i in examples[image_column]]
+
+# CAPTIONS #####################################################################
+
+def tokenize_captions(captions, tokenizer):
+    return tokenizer(
+        captions,
+        max_length=tokenizer.model_max_length,
+        padding="max_length",
+        truncation=True,
+        return_tensors="pt").input_ids
+
+def preprocess_captions(examples: dict, tokenizer: callable, caption_column: str='text') -> list:
+    __captions = [(__c if isinstance(__c, str) else random.choice(__c)) for __c in examples[caption_column]]
+    return tokenize_captions(captions=__captions, tokenizer=tokenizer)
+
+# PREPROCESSING ################################################################
+
+def preprocess(examples: dict, transforms: callable, tokenizer: callable, image_column: str='image', caption_column: str='text') -> dict:
+    examples["pixel_values"] = preprocess_images(examples, transforms=transforms, image_column=image_column)
+    examples["input_ids"] = preprocess_captions(examples, tokenizer=tokenizer, caption_column=caption_column)
+    return examples
+
+def collate_fn(examples: iter):
+    __input_ids = torch.stack([__e['input_ids'] for __e in examples])
+    __pixel_values = torch.stack([__e['pixel_values'] for __e in examples])
+    __pixel_values = __pixel_values.to(memory_format=torch.contiguous_format).float()
+    return {'pixel_values': __pixel_values, 'input_ids': __input_ids}
+
 # ARGS #########################################################################
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Simple example of a training script.")
+    parser = argparse.ArgumentParser(description='Simple example of a training script.')
     # random config
     parser.add_argument('--seed', type=int, default=random.randint(0, 2 ** 32), help='A seed for reproducible training.')
     # output config
     parser.add_argument('--output_dir', type=str, default='outputs', required=False, help='The output directory where the model predictions and checkpoints will be written.')
     parser.add_argument('--cache_dir', type=str, default=None, required=False, help='The directory where the downloaded models and datasets will be stored.')
     parser.add_argument('--logging_dir', type=str, default='logs', required=False, help='[TensorBoard](https://www.tensorflow.org/tensorboard) log directory.')
-    parser.add_argument("--project_name", type=str, default="text-to-text", help="The `project_name` passed to the trackers https://huggingface.co/docs/accelerate/v0.17.0/en/package_reference/accelerator#accelerate.Accelerator")
+    parser.add_argument('--project_name', type=str, default='text-to-text', help='The `project_name` passed to the trackers https://huggingface.co/docs/accelerate/v0.17.0/en/package_reference/accelerator#accelerate.Accelerator')
     # model config
     parser.add_argument('--model_name', type=str, default=None, required=False, help='Path to pretrained model or model identifier from huggingface.co/models.')
     parser.add_argument('--revision', type=str, default=None, required=False, help='Revision of pretrained model identifier from huggingface.co/models.')
     parser.add_argument('--variant', type=str, default=None, required=False, help='Variant of the model files of the pretrained model identifier from huggingface.co/models, e.g. fp16')
-    parser.add_argument('--lora_rank', type=int, default=8, required=False, help='The dimension of the LoRA update matrices.')
     # dataset config
     parser.add_argument('--dataset_name', type=str, default='apehex/ascii-art-datacompdr-12m', required=False, help='The name of the Dataset (from the HuggingFace hub) to train on.')
     parser.add_argument('--dataset_config', type=str, default='default', required=False, help='The config of the Dataset, leave as None if there\'s only one config.')
@@ -108,7 +188,7 @@ def parse_args():
     parser.add_argument('--random_flip', default=False, required=False, action='store_true', help='whether to randomly flip images horizontally.')
     parser.add_argument('--image_interpolation_mode', type=str, default='lanczos', choices=[__f.lower() for __f in dir(torchvision.transforms.InterpolationMode) if not __f.startswith('__') and not __f.endswith('__')], required=False, help='The image interpolation method to use for resizing images.')
     # checkpoint config
-    parser.add_argument('--resume_from', type=str, default='', required=False, help='Use a path saved by `--checkpoint_steps`, or `"latest"` to automatically select the last available checkpoint.')
+    parser.add_argument('--resume_from', type=str, default='latest', required=False, help='Use a path saved by `--checkpoint_steps`, or `"latest"` to automatically select the last available checkpoint.')
     parser.add_argument('--checkpoint_steps', type=int, default=256, required=False, help='Save a checkpoint of the training state every X updates, for resuming with `--resume_from`.')
     parser.add_argument('--checkpoint_limit', type=int, default=0, required=False, help='Max number of checkpoints to store.')
     # iteration config
@@ -132,9 +212,9 @@ def parse_args():
     parser.add_argument('--adam_epsilon', type=float, default=1e-08, required=False, help='Epsilon value for the Adam optimizer')
     parser.add_argument('--max_grad_norm', type=float, default=1.0, required=False, help='Max gradient norm.')
     # ema config
-    parser.add_argument("--use_ema", action="store_true", help="Whether to use EMA model.")
-    parser.add_argument("--offload_ema", action="store_true", help="Offload EMA model to CPU during training step.")
-    parser.add_argument("--foreach_ema", action="store_true", help="Use faster foreach implementation of EMAModel.")
+    parser.add_argument('--use_ema', action='store_true', help='Whether to use EMA model.')
+    parser.add_argument('--offload_ema', action='store_true', help='Offload EMA model to CPU during training step.')
+    parser.add_argument('--foreach_ema', action='store_true', help='Use faster foreach implementation of EMAModel.')
     # precision config
     parser.add_argument('--mixed_precision', type=str, default='bf16', required=False, choices=['no', 'fp16', 'bf16'], help='Choose between fp16 and bf16 (bfloat16).')
     parser.add_argument('--allow_tf32', default=False, required=False, action='store_true', help='Whether or not to allow TF32 on Ampere GPUs. Can be used to speed up training.')
@@ -147,14 +227,14 @@ def parse_args():
     # diffusion config
     parser.add_argument('--prediction_type', type=str, default='epsilon', required=False, help='The prediction type, among "epsilon", "v_prediction" or `None`.')
     parser.add_argument('--noise_offset', type=float, default=0.0, required=False, help='The scale of noise offset.')
-    parser.add_argument("--input_perturbation", type=float, default=0.0, help="The scale of input perturbation. Recommended 0.1.")
+    parser.add_argument('--input_perturbation', type=float, default=0.0, help='The scale of input perturbation. Recommended 0.1.')
     # validation config
     parser.add_argument('--validation_prompts', type=str, default='', required=True, nargs='+', help='A set of prompts that are sampled during training for inference.')
     parser.add_argument('--validation_epochs', type=int, default=1, required=False, help='Run fine-tuning validation every X epochs.')
     # dream training
-    parser.add_argument("--dream_training", default=False, required=False, action="store_true", help="Use the DREAM training method https://arxiv.org/abs/2312.00210")
-    parser.add_argument("--dream_detail_preservation", type=float, default=1.0, required=False, help="Dream detail preservation factor p (should be greater than 0; default=1.0, as suggested in the paper)")
-    parser.add_argument("--noise_offset", type=float, default=0, help="The scale of noise offset.")
+    parser.add_argument('--dream_training', default=False, required=False, action='store_true', help='Use the DREAM training method https://arxiv.org/abs/2312.00210')
+    parser.add_argument('--dream_detail_preservation', type=float, default=1.0, required=False, help='Dream detail preservation factor p (should be greater than 0; default=1.0, as suggested in the paper)')
+    parser.add_argument('--noise_offset', type=float, default=0, help='The scale of noise offset.')
     # actually process the CLI inputs
     return parser.parse_args()
 
@@ -167,84 +247,58 @@ def main():
 
     accelerator_project_config = accelerate.utils.ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
 
-    accelerator = Accelerator(
+    accelerator = accelerate.Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
         log_with='tensorboard',
         project_config=accelerator_project_config,
     )
 
-    # Make one log on every process with the configuration for debugging.
+    # make one log on every process with the configuration for debugging
     logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-        datefmt="%m/%d/%Y %H:%M:%S",
-        level=logging.INFO,
-    )
+        format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
+        datefmt='%m/%d/%Y %H:%M:%S',
+        level=logging.INFO,)
     logger.info(accelerator.state, main_process_only=False)
-    if accelerator.is_local_main_process:
-        datasets.utils.logging.set_verbosity_warning()
-        transformers.utils.logging.set_verbosity_warning()
-        diffusers.utils.logging.set_verbosity_info()
-    else:
-        datasets.utils.logging.set_verbosity_error()
-        transformers.utils.logging.set_verbosity_error()
-        diffusers.utils.logging.set_verbosity_error()
+    datasets.utils.logging.set_verbosity_warning()
+    transformers.utils.logging.set_verbosity_warning()
+    diffusers.utils.logging.set_verbosity_info()
 
-    # If passed along, set the training seed now.
-    if args.seed is not None:
-        accelerate.utils.set_seed(args.seed)
+    # set the training seed now
+    accelerate.utils.set_seed(args.seed)
 
-    # Handle the repository creation
-    if accelerator.is_main_process:
-        if args.output_dir is not None:
-            os.makedirs(args.output_dir, exist_ok=True)
+    # create the output directory
+    os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(args.logging_dir, exist_ok=True)
 
     # Load scheduler, tokenizer and models.
-    noise_scheduler = diffusers.DDPMScheduler.from_pretrained(args.model_name, subfolder="scheduler")
+    noise_scheduler = diffusers.DDPMScheduler.from_pretrained(args.model_name, subfolder='scheduler')
     tokenizer = transformers.CLIPTokenizer.from_pretrained(
-        args.model_name, subfolder="tokenizer", revision=args.revision
+        args.model_name, subfolder='tokenizer', revision=args.revision
     )
 
-    def deepspeed_zero_init_disabled_context_manager():
-        """
-        returns either a context list that includes one that will disable zero.Init or an empty context list
-        """
-        deepspeed_plugin = accelerate.state.AcceleratorState().deepspeed_plugin if accelerate.state.is_initialized() else None
-        if deepspeed_plugin is None:
-            return []
-
-        return [deepspeed_plugin.zero3_init_context_manager(enable=False)]
-
-    # Currently Accelerate doesn't know how to handle multiple models under Deepspeed ZeRO stage 3.
-    # For this to work properly all models must be run through `accelerate.prepare`. But accelerate
-    # will try to assign the same optimizer with the same weights to all models during
-    # `deepspeed.initialize`, which of course doesn't work.
-    #
-    # For now the following workaround will partially support Deepspeed ZeRO-3, by excluding the 2
-    # frozen models from being partitioned during `zero.Init` which gets called during
-    # `from_pretrained` So CLIPTextModel and AutoencoderKL will not enjoy the parameter sharding
-    # across multiple gpus and only UNet2DConditionModel will get ZeRO sharded.
+    # exclude the 2 frozen models from partitioning during `zero.Init`
     with transformers.utils.ContextManagers(deepspeed_zero_init_disabled_context_manager()):
         text_encoder = transformers.CLIPTextModel.from_pretrained(
-            args.model_name, subfolder="text_encoder", revision=args.revision, variant=args.variant
+            args.model_name, subfolder='text_encoder', revision=args.revision, variant=args.variant
         )
         vae = diffusers.AutoencoderKL.from_pretrained(
-            args.model_name, subfolder="vae", revision=args.revision, variant=args.variant
+            args.model_name, subfolder='vae', revision=args.revision, variant=args.variant
         )
 
     unet = diffusers.UNet2DConditionModel.from_pretrained(
-        args.model_name, subfolder="unet", revision=args.revision
+        args.model_name, subfolder='unet', revision=args.revision
     )
 
-    # Freeze vae and text_encoder and set unet to trainable
+    # freeze vae and text_encoder and set unet to trainable
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
     unet.train()
 
-    # Create EMA for the unet.
+    # create EMA for the unet
     if args.use_ema:
         ema_unet = diffusers.UNet2DConditionModel.from_pretrained(
-            args.model_name, subfolder="unet", revision=args.revision, variant=args.variant
+            args.model_name, subfolder='unet', revision=args.revision, variant=args.variant
         )
         ema_unet = diffusers.training_utils.EMAModel(
             ema_unet.parameters(),
@@ -253,47 +307,13 @@ def main():
             foreach=args.foreach_ema,
         )
 
+    # xformer attention
     if args.enable_xformers:
         import xformers
         unet.enable_xformers()
 
-    # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
-    def save_model_hook(models, weights, output_dir):
-        if accelerator.is_main_process:
-            if args.use_ema:
-                ema_unet.save_pretrained(os.path.join(output_dir, "unet_ema"))
-
-            for i, model in enumerate(models):
-                model.save_pretrained(os.path.join(output_dir, "unet"))
-
-                # make sure to pop weight so that corresponding model is not saved again
-                weights.pop()
-
-    def load_model_hook(models, input_dir):
-        if args.use_ema:
-            load_model = diffusers.training_utils.EMAModel.from_pretrained(
-                os.path.join(input_dir, "unet_ema"), diffusers.UNet2DConditionModel, foreach=args.foreach_ema
-            )
-            ema_unet.load_state_dict(load_model.state_dict())
-            if args.offload_ema:
-                ema_unet.pin_memory()
-            else:
-                ema_unet.to(accelerator.device)
-            del load_model
-
-        for _ in range(len(models)):
-            # pop models so that they are not loaded again
-            model = models.pop()
-
-            # load diffusers style into model
-            load_model = diffusers.UNet2DConditionModel.from_pretrained(input_dir, subfolder="unet")
-            model.register_to_config(**load_model.config)
-
-            model.load_state_dict(load_model.state_dict())
-            del load_model
-
-    accelerator.register_save_state_pre_hook(save_model_hook)
-    accelerator.register_load_state_pre_hook(load_model_hook)
+    accelerator.register_save_state_pre_hook(functools.partial(save_model_hook, ema_model=ema_unet, accelerator=accelerator, args=args))
+    accelerator.register_load_state_pre_hook(functools.partial(load_model_hook, ema_model=ema_unet, accelerator=accelerator, args=args))
 
     if args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
@@ -306,7 +326,7 @@ def main():
             args.learning_rate * args.gradient_accumulation_steps * args.batch_dim * accelerator.num_processes
         )
 
-    # Initialize the optimizer
+    # init the optimizer
     if args.use_8bit_adam:
         import bitsandbytes as bnb
         optimizer_cls = bnb.optim.AdamW8bit
@@ -334,85 +354,36 @@ def main():
     #     data_files=os.path.join(args.dataset_dir, "**"),
     #     cache_dir=args.cache_dir)
 
-    # Preprocessing the datasets.
-    # We need to tokenize inputs and targets.
-    column_names = dataset["train"].column_names
+    # select the fields in the dataset to parse data from
+    column_names = dataset.column_names
+    image_column = args.image_column if (args.image_column in column_names) else column_names[0]
+    caption_column = args.caption_column if (args.caption_column in column_names) else column_names[1]
 
-    # 6. Get the column names for input/target.
-    dataset_columns = DATASET_NAME_MAPPING.get(args.dataset_name, None)
-    if args.image_column is None:
-        image_column = dataset_columns[0] if dataset_columns is not None else column_names[0]
-    else:
-        image_column = args.image_column
-        if image_column not in column_names:
-            raise ValueError(
-                f"--image_column' value '{args.image_column}' needs to be one of: {', '.join(column_names)}"
-            )
-    if args.caption_column is None:
-        caption_column = dataset_columns[1] if dataset_columns is not None else column_names[1]
-    else:
-        caption_column = args.caption_column
-        if caption_column not in column_names:
-            raise ValueError(
-                f"--caption_column' value '{args.caption_column}' needs to be one of: {', '.join(column_names)}"
-            )
+    # get the interpolation method from the args
+    interpolation = getattr(torchvision.transforms.InterpolationMode, args.image_interpolation_mode.upper(), 'lanczos')
 
-    # Preprocessing the datasets.
-    # We need to tokenize input captions and transform the images.
-    def tokenize_captions(examples, is_train=True):
-        captions = []
-        for caption in examples[caption_column]:
-            if isinstance(caption, str):
-                captions.append(caption)
-            elif isinstance(caption, (list, np.ndarray)):
-                # take a random caption if there are multiple
-                captions.append(random.choice(caption) if is_train else caption[0])
-            else:
-                raise ValueError(
-                    f"Caption column `{caption_column}` should contain either strings or lists of strings."
-                )
-        inputs = tokenizer(
-            captions, max_length=tokenizer.model_max_length, padding="max_length", truncation=True, return_tensors="pt"
-        )
-        return inputs.input_ids
-
-    # Get the specified interpolation method from the args
-    interpolation = getattr(torchvision.transforms.InterpolationMode, args.image_interpolation_mode.upper(), None)
-
-    # Raise an error if the interpolation method is invalid
-    if interpolation is None:
-        raise ValueError(f"Unsupported interpolation mode {args.image_interpolation_mode}.")
-
-    # Data preprocessing transformations
-    train_transforms = torchvision.transforms.Compose(
-        [
+    # image transformations
+    train_transforms = torchvision.transforms.Compose([
             torchvision.transforms.Resize(args.resolution, interpolation=interpolation),  # Use dynamic interpolation method
             torchvision.transforms.CenterCrop(args.resolution) if args.center_crop else torchvision.transforms.RandomCrop(args.resolution),
             torchvision.transforms.RandomHorizontalFlip() if args.random_flip else torchvision.transforms.Lambda(lambda x: x),
             torchvision.transforms.ToTensor(),
-            torchvision.transforms.Normalize([0.5], [0.5]),
-        ]
-    )
+            torchvision.transforms.Normalize([0.5], [0.5]),])
 
-    def preprocess_train(examples):
-        images = [image.convert("RGB") for image in examples[image_column]]
-        examples["pixel_values"] = [train_transforms(image) for image in images]
-        examples["input_ids"] = tokenize_captions(examples)
-        return examples
+    __preprocess = functools.partial(
+        preprocess,
+        transforms=train_transforms,
+        tokenizer=tokenizer,
+        image_column=image_column,
+        caption_column=caption_column)
 
     with accelerator.main_process_first():
         if args.max_samples:
-            dataset["train"] = dataset["train"].shuffle(seed=args.seed).select(range(args.max_samples))
+            dataset = dataset.shuffle(seed=args.seed).select(range(args.max_samples))
         # Set the training transforms
-        train_dataset = dataset["train"].with_transform(preprocess_train)
+        train_dataset = dataset.with_transform(__preprocess)
 
-    def collate_fn(examples):
-        pixel_values = torch.stack([example["pixel_values"] for example in examples])
-        pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
-        input_ids = torch.stack([example["input_ids"] for example in examples])
-        return {"pixel_values": pixel_values, "input_ids": input_ids}
-
-    # DataLoaders creation:
+    # distribute data loading
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
         shuffle=True,
@@ -421,8 +392,7 @@ def main():
         num_workers=args.dataloader_num_workers,
     )
 
-    # Scheduler and math around the number of training steps.
-    # Check the PR https://github.com/huggingface/diffusers/pull/8312 for detailed explanation.
+    # cf https://github.com/huggingface/diffusers/pull/8312 for detailed explanation.
     num_warmup_steps_for_scheduler = args.lr_warmup_steps * accelerator.num_processes
     if not args.step_num:
         len_train_dataloader_after_sharding = math.ceil(len(train_dataloader) / accelerator.num_processes)
@@ -440,7 +410,7 @@ def main():
         num_training_steps=num_training_steps_for_scheduler,
     )
 
-    # Prepare everything with our `accelerator`.
+    # distribute everything across devices
     unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
         unet, optimizer, train_dataloader, lr_scheduler
     )
@@ -451,8 +421,7 @@ def main():
         else:
             ema_unet.to(accelerator.device)
 
-    # For mixed precision training we cast all non-trainable weights (vae, non-lora text_encoder and non-lora unet) to half-precision
-    # as these weights are only used for inference, keeping weights in full precision is not required.
+    # cast all non-trainable weights (vae, non-lora text_encoder and non-lora unet) to half-precision
     weight_dtype = torch.float32
     if accelerator.mixed_precision == "fp16":
         weight_dtype = torch.float16
@@ -461,11 +430,11 @@ def main():
         weight_dtype = torch.bfloat16
         args.mixed_precision = accelerator.mixed_precision
 
-    # Move text_encode and vae to gpu and cast to weight_dtype
+    # move text_encode and vae to gpu and cast to weight_dtype
     text_encoder.to(accelerator.device, dtype=weight_dtype)
     vae.to(accelerator.device, dtype=weight_dtype)
 
-    # We need to recalculate our total training steps as the size of the training dataloader may have changed.
+    # match the total training steps with the dataloader size
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
     if not args.step_num:
         args.step_num = args.epoch_num * num_update_steps_per_epoch
@@ -475,23 +444,16 @@ def main():
                 f"the expected length ({len_train_dataloader_after_sharding}) when the learning rate scheduler was created. "
                 f"This inconsistency may result in the learning rate scheduler not functioning properly."
             )
-    # Afterwards we recalculate our number of training epochs
+    # deduce the number of epochs
     args.epoch_num = math.ceil(args.step_num / num_update_steps_per_epoch)
 
-    # We need to initialize the trackers we use, and also store our configuration.
-    # The trackers initializes automatically on the main process.
+    # init the trackers
     if accelerator.is_main_process:
         tracker_config = dict(vars(args))
         tracker_config.pop("validation_prompts")
         accelerator.init_trackers(args.project_name, tracker_config)
 
-    # Function for unwrapping if model was compiled with `torch.compile`.
-    def unwrap_model(model):
-        model = accelerator.unwrap_model(model)
-        model = model._orig_mod if diffusers.utils.torch_utils.is_compiled_module(model) else model
-        return model
-
-    # Train!
+    # train!
     total_batch_size = args.batch_dim * accelerator.num_processes * args.gradient_accumulation_steps
 
     logger.info("***** Running training *****")
@@ -698,7 +660,7 @@ def main():
     # Create the pipeline using the trained modules and save it.
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        unet = unwrap_model(unet)
+        unet = unwrap_model(accelerator, unet)
         if args.use_ema:
             ema_unet.copy_to(unet.parameters())
 
