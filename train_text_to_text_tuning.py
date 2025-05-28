@@ -43,10 +43,10 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
 
     pipeline = diffusers.StableDiffusionPipeline.from_pretrained(
         args.model_name,
-        vae=accelerator.unwrap_model(accelerator, vae),
-        text_encoder=accelerator.unwrap_model(accelerator, text_encoder),
+        vae=vae, # accelerator.unwrap_model(vae),
+        text_encoder=text_encoder, # accelerator.unwrap_model(text_encoder),
         tokenizer=tokenizer,
-        unet=accelerator.unwrap_model(accelerator, unet),
+        unet=accelerator.unwrap_model(unet),
         safety_checker=None,
         revision=args.revision,
         variant=args.variant,
@@ -90,7 +90,7 @@ def unwrap_model(accelerator, model):
 def deepspeed_zero_init_disabled_context_manager():
     deepspeed_plugins = [accelerate.state.AcceleratorState().deepspeed_plugin] if accelerate.state.is_initialized() else []
     # disable zero.Init
-    return [__p.zero3_init_context_manager(enable=False) for __p in deepspeed_plugins]
+    return [__p.zero3_init_context_manager(enable=False) for __p in deepspeed_plugins if __p is not None]
 
 # IO HOOKS #####################################################################
 
@@ -212,9 +212,9 @@ def parse_args():
     parser.add_argument('--adam_epsilon', type=float, default=1e-08, required=False, help='Epsilon value for the Adam optimizer')
     parser.add_argument('--max_grad_norm', type=float, default=1.0, required=False, help='Max gradient norm.')
     # ema config
-    parser.add_argument('--use_ema', action='store_true', help='Whether to use EMA model.')
-    parser.add_argument('--offload_ema', action='store_true', help='Offload EMA model to CPU during training step.')
-    parser.add_argument('--foreach_ema', action='store_true', help='Use faster foreach implementation of EMAModel.')
+    parser.add_argument('--use_ema', default=False, required=False, action='store_true', help='Whether to use EMA model.')
+    parser.add_argument('--offload_ema', default=False, required=False, action='store_true', help='Offload EMA model to CPU during training step.')
+    parser.add_argument('--foreach_ema', default=False, required=False, action='store_true', help='Use faster foreach implementation of EMAModel.')
     # precision config
     parser.add_argument('--mixed_precision', type=str, default='bf16', required=False, choices=['no', 'fp16', 'bf16'], help='Choose between fp16 and bf16 (bfloat16).')
     parser.add_argument('--allow_tf32', default=False, required=False, action='store_true', help='Whether or not to allow TF32 on Ampere GPUs. Can be used to speed up training.')
@@ -234,7 +234,6 @@ def parse_args():
     # dream training
     parser.add_argument('--dream_training', default=False, required=False, action='store_true', help='Use the DREAM training method https://arxiv.org/abs/2312.00210')
     parser.add_argument('--dream_detail_preservation', type=float, default=1.0, required=False, help='Dream detail preservation factor p (should be greater than 0; default=1.0, as suggested in the paper)')
-    parser.add_argument('--noise_offset', type=float, default=0, help='The scale of noise offset.')
     # actually process the CLI inputs
     return parser.parse_args()
 
@@ -306,6 +305,8 @@ def main():
             model_config=ema_unet.config,
             foreach=args.foreach_ema,
         )
+    else:
+        ema_unet = None
 
     # xformer attention
     if args.enable_xformers:
@@ -344,7 +345,8 @@ def main():
     # download the dataset
     dataset = datasets.load_dataset(
         args.dataset_name,
-        args.dataset_config,
+        name=args.dataset_config,
+        split=args.dataset_split,
         cache_dir=args.cache_dir,
         data_dir=args.dataset_dir)
 
