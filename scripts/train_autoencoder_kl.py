@@ -20,45 +20,32 @@ import logging
 import math
 import os
 import shutil
-from pathlib import Path
+import pathlib
 
-import accelerate
+import datasets
 import lpips
-import numpy as np
+import numpy
 import torch
-import torch.nn.functional as F
+import torch.nn.functional
 import torch.utils.checkpoint
 import torchvision
 import transformers
-from accelerate import Accelerator
-from accelerate.logging import get_logger
-from accelerate.utils import ProjectConfiguration, set_seed
-from datasets import load_dataset
-from huggingface_hub import create_repo, upload_folder
-from packaging import version
-from PIL import Image
-from taming.modules.losses.vqperceptual import NLayerDiscriminator, hinge_d_loss, vanilla_d_loss, weights_init
-from torchvision import transforms
-from tqdm.auto import tqdm
+
+import accelerate
+import accelerate.logging
+import accelerate.utils
+import packaging
+import PIL as pillow
+import taming.modules.losses.vqperceptual
+import torchvision
+import tqdm.auto
 
 import diffusers
-from diffusers import AutoencoderKL
-from diffusers.optimization import get_scheduler
-from diffusers.training_utils import EMAModel
-from diffusers.utils import check_min_version, is_wandb_available, make_image_grid
-from diffusers.utils.hub_utils import load_or_create_model_card, populate_model_card
-from diffusers.utils.import_utils import is_xformers_available
-from diffusers.utils.torch_utils import is_compiled_module
+import diffusers.optimization
+import diffusers.training_utils
+import diffusers.utils.torch_utils
 
-
-if is_wandb_available():
-    import wandb
-
-# Will error if the minimal version of diffusers is not installed. Remove at your own risks.
-check_min_version("0.33.0.dev0")
-
-logger = get_logger(__name__)
-
+logger = accelerate.logging.get_logger(__name__)
 
 @torch.no_grad()
 def log_validation(vae, args, accelerator, weight_dtype, step, is_final_validation=False):
@@ -67,23 +54,23 @@ def log_validation(vae, args, accelerator, weight_dtype, step, is_final_validati
     if not is_final_validation:
         vae = accelerator.unwrap_model(vae)
     else:
-        vae = AutoencoderKL.from_pretrained(args.output_dir, torch_dtype=weight_dtype)
+        vae = diffusers.AutoencoderKL.from_pretrained(args.output_dir, torch_dtype=weight_dtype)
 
     images = []
     inference_ctx = contextlib.nullcontext() if is_final_validation else torch.autocast("cuda")
 
-    image_transforms = transforms.Compose(
+    __transforms = torchvision.transforms.Compose(
         [
-            transforms.Resize(args.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
-            transforms.CenterCrop(args.resolution),
-            transforms.ToTensor(),
-            transforms.Normalize([0.5], [0.5]),
+            torchvision.transforms.Resize(args.resolution, interpolation=torchvision.transforms.InterpolationMode.BILINEAR),
+            torchvision.transforms.CenterCrop(args.resolution),
+            torchvision.transforms.ToTensor(),
+            torchvision.transforms.Normalize([0.5], [0.5]),
         ]
     )
 
     for i, validation_image in enumerate(args.validation_image):
-        validation_image = Image.open(validation_image).convert("RGB")
-        targets = image_transforms(validation_image).to(accelerator.device, weight_dtype)
+        validation_image = pillow.Image.open(validation_image).convert("RGB")
+        targets = __transforms(validation_image).to(accelerator.device, weight_dtype)
         targets = targets.unsqueeze(0)
 
         with inference_ctx:
@@ -94,16 +81,8 @@ def log_validation(vae, args, accelerator, weight_dtype, step, is_final_validati
     tracker_key = "test" if is_final_validation else "validation"
     for tracker in accelerator.trackers:
         if tracker.name == "tensorboard":
-            np_images = np.stack([np.asarray(img) for img in images])
+            np_images = numpy.stack([numpy.asarray(img) for img in images])
             tracker.writer.add_images(f"{tracker_key}: Original (left), Reconstruction (right)", np_images, step)
-        elif tracker.name == "wandb":
-            tracker.log(
-                {
-                    f"{tracker_key}: Original (left), Reconstruction (right)": [
-                        wandb.Image(torchvision.utils.make_grid(image)) for _, image in enumerate(images)
-                    ]
-                }
-            )
         else:
             logger.warn(f"image logging not implemented for {tracker.name}")
 
@@ -112,41 +91,12 @@ def log_validation(vae, args, accelerator, weight_dtype, step, is_final_validati
 
     return images
 
+# MODEL ########################################################################
 
-def save_model_card(repo_id: str, images=None, base_model=str, repo_folder=None):
-    img_str = ""
-    if images is not None:
-        img_str = "You can find some example images below.\n\n"
-        make_image_grid(images, 1, len(images)).save(os.path.join(repo_folder, "images.png"))
-        img_str += "![images](./images.png)\n"
-
-    model_description = f"""
-# autoencoderkl-{repo_id}
-
-These are autoencoderkl weights trained on {base_model} with new type of conditioning.
-{img_str}
-"""
-    model_card = load_or_create_model_card(
-        repo_id_or_path=repo_id,
-        from_training=True,
-        license="creativeml-openrail-m",
-        base_model=base_model,
-        model_description=model_description,
-        inference=True,
-    )
-
-    tags = [
-        "stable-diffusion",
-        "stable-diffusion-diffusers",
-        "image-to-image",
-        "diffusers",
-        "autoencoderkl",
-        "diffusers-training",
-    ]
-    model_card = populate_model_card(model_card, tags=tags)
-
-    model_card.save(os.path.join(repo_folder, "README.md"))
-
+def unwrap_model(model):
+    model = accelerator.unwrap_model(model)
+    model = model._orig_mod if diffusers.utils.torch_utils.is_compiled_module(model) else model
+    return model
 
 def parse_args(input_args=None):
     parser = argparse.ArgumentParser(description="Simple example of a AutoencoderKL training script.")
@@ -302,7 +252,6 @@ def parse_args(input_args=None):
     parser.add_argument("--adam_weight_decay", type=float, default=1e-2, help="Weight decay to use.")
     parser.add_argument("--adam_epsilon", type=float, default=1e-08, help="Epsilon value for the Adam optimizer")
     parser.add_argument("--max_grad_norm", default=1.0, type=float, help="Max gradient norm.")
-    parser.add_argument("--push_to_hub", action="store_true", help="Whether or not to push the model to the Hub.")
     parser.add_argument("--hub_token", type=str, default=None, help="The token to use to push to the Model Hub.")
     parser.add_argument(
         "--hub_model_id",
@@ -498,7 +447,7 @@ def make_train_dataset(args, accelerator):
     # download the dataset.
     if args.dataset_name is not None:
         # Downloading and loading a dataset from the hub.
-        dataset = load_dataset(
+        dataset = datasets.load_dataset(
             args.dataset_name,
             args.dataset_config_name,
             cache_dir=args.cache_dir,
@@ -508,7 +457,7 @@ def make_train_dataset(args, accelerator):
         data_files = {}
         if args.train_data_dir is not None:
             data_files["train"] = os.path.join(args.train_data_dir, "**")
-        dataset = load_dataset(
+        dataset = datasets.load_dataset(
             "imagefolder",
             data_files=data_files,
             cache_dir=args.cache_dir,
@@ -531,18 +480,18 @@ def make_train_dataset(args, accelerator):
                 f"`--image_column` value '{args.image_column}' not found in dataset columns. Dataset columns are: {', '.join(column_names)}"
             )
 
-    image_transforms = transforms.Compose(
+    __transforms = torchvision.transforms.Compose(
         [
-            transforms.Resize(args.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
-            transforms.CenterCrop(args.resolution),
-            transforms.ToTensor(),
-            transforms.Normalize([0.5], [0.5]),
+            torchvision.transforms.Resize(args.resolution, interpolation=torchvision.transforms.InterpolationMode.BILINEAR),
+            torchvision.transforms.CenterCrop(args.resolution),
+            torchvision.transforms.ToTensor(),
+            torchvision.transforms.Normalize([0.5], [0.5]),
         ]
     )
 
     def preprocess_train(examples):
         images = [image.convert("RGB") for image in examples[image_column]]
-        images = [image_transforms(image) for image in images]
+        images = [__transforms(image) for image in images]
 
         examples["pixel_values"] = images
 
@@ -571,11 +520,11 @@ def main(args):
             " Please use `huggingface-cli login` to authenticate with the Hub."
         )
 
-    logging_dir = Path(args.output_dir, args.logging_dir)
+    logging_dir = pathlib.Path(args.output_dir, args.logging_dir)
 
-    accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
+    accelerator_project_config = accelerate.utils.ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
 
-    accelerator = Accelerator(
+    accelerator = accelerate.Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
         log_with=args.report_to,
@@ -602,41 +551,30 @@ def main(args):
 
     # If passed along, set the training seed now.
     if args.seed is not None:
-        set_seed(args.seed)
+        accelerate.utils.set_seed(args.seed)
 
     # Handle the repository creation
     if accelerator.is_main_process:
         if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
 
-        if args.push_to_hub:
-            repo_id = create_repo(
-                repo_id=args.hub_model_id or Path(args.output_dir).name, exist_ok=True, token=args.hub_token
-            ).repo_id
-
     # Load AutoencoderKL
     if args.pretrained_model_name_or_path is None and args.model_config_name_or_path is None:
-        config = AutoencoderKL.load_config("stabilityai/sd-vae-ft-mse")
-        vae = AutoencoderKL.from_config(config)
+        config = diffusers.AutoencoderKL.load_config("stabilityai/sd-vae-ft-mse")
+        vae = diffusers.AutoencoderKL.from_config(config)
     elif args.pretrained_model_name_or_path is not None:
-        vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, revision=args.revision)
+        vae = diffusers.AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, revision=args.revision)
     else:
-        config = AutoencoderKL.load_config(args.model_config_name_or_path)
-        vae = AutoencoderKL.from_config(config)
+        config = diffusers.AutoencoderKL.load_config(args.model_config_name_or_path)
+        vae = diffusers.AutoencoderKL.from_config(config)
     if args.use_ema:
-        ema_vae = EMAModel(vae.parameters(), model_cls=AutoencoderKL, model_config=vae.config)
+        ema_vae = diffusers.training_utils.EMAModel(vae.parameters(), model_cls=diffusers.AutoencoderKL, model_config=vae.config)
     perceptual_loss = lpips.LPIPS(net="vgg").eval()
-    discriminator = NLayerDiscriminator(input_nc=3, n_layers=3, use_actnorm=False).apply(weights_init)
+    discriminator = taming.modules.losses.vqperceptual.NLayerDiscriminator(input_nc=3, n_layers=3, use_actnorm=False).apply(taming.modules.losses.vqperceptual.weights_init)
     discriminator = torch.nn.SyncBatchNorm.convert_sync_batchnorm(discriminator)
 
-    # Taken from [Sayak Paul's Diffusers PR #6511](https://github.com/huggingface/diffusers/pull/6511/files)
-    def unwrap_model(model):
-        model = accelerator.unwrap_model(model)
-        model = model._orig_mod if is_compiled_module(model) else model
-        return model
-
     # `accelerate` 0.16.0 will have better support for customized saving
-    if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
+    if packaging.version.parse(accelerate.__version__) >= packaging.version.parse("0.16.0"):
         # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
         def save_model_hook(models, weights, output_dir):
             if accelerator.is_main_process:
@@ -650,7 +588,7 @@ def main(args):
                     weights.pop()
                     model = models[i]
 
-                    if isinstance(model, AutoencoderKL):
+                    if isinstance(model, diffusers.AutoencoderKL):
                         sub_dir = "autoencoderkl"
                         model.save_pretrained(os.path.join(output_dir, sub_dir))
                     else:
@@ -664,21 +602,21 @@ def main(args):
             while len(models) > 0:
                 if args.use_ema:
                     sub_dir = "autoencoderkl_ema"
-                    load_model = EMAModel.from_pretrained(os.path.join(input_dir, sub_dir), AutoencoderKL)
+                    load_model = diffusers.training_utils.EMAModel.from_pretrained(os.path.join(input_dir, sub_dir), diffusers.AutoencoderKL)
                     ema_vae.load_state_dict(load_model.state_dict())
                     ema_vae.to(accelerator.device)
                     del load_model
 
                 # pop models so that they are not loaded again
                 model = models.pop()
-                load_model = NLayerDiscriminator(input_nc=3, n_layers=3, use_actnorm=False).load_state_dict(
+                load_model = taming.modules.losses.vqperceptual.NLayerDiscriminator(input_nc=3, n_layers=3, use_actnorm=False).load_state_dict(
                     os.path.join(input_dir, "discriminator", "pytorch_model.bin")
                 )
                 model.load_state_dict(load_model.state_dict())
                 del load_model
 
                 model = models.pop()
-                load_model = AutoencoderKL.from_pretrained(input_dir, subfolder="autoencoderkl")
+                load_model = diffusers.AutoencoderKL.from_pretrained(input_dir, subfolder="autoencoderkl")
                 model.register_to_config(**load_model.config)
                 model.load_state_dict(load_model.state_dict())
                 del load_model
@@ -696,17 +634,8 @@ def main(args):
     discriminator.train()
 
     if args.enable_xformers_memory_efficient_attention:
-        if is_xformers_available():
-            import xformers
-
-            xformers_version = version.parse(xformers.__version__)
-            if xformers_version == version.parse("0.0.16"):
-                logger.warning(
-                    "xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details."
-                )
-            vae.enable_xformers_memory_efficient_attention()
-        else:
-            raise ValueError("xformers is not available. Make sure it is installed correctly")
+        import xformers
+        vae.enable_xformers_memory_efficient_attention()
 
     if args.gradient_checkpointing:
         vae.enable_gradient_checkpointing()
@@ -777,7 +706,7 @@ def main(args):
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
         overrode_max_train_steps = True
 
-    lr_scheduler = get_scheduler(
+    lr_scheduler = diffusers.optimization.get_scheduler(
         args.lr_scheduler,
         optimizer=optimizer,
         num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
@@ -785,7 +714,7 @@ def main(args):
         num_cycles=args.lr_num_cycles,
         power=args.lr_power,
     )
-    disc_lr_scheduler = get_scheduler(
+    disc_lr_scheduler = diffusers.optimization.get_scheduler(
         args.disc_lr_scheduler,
         optimizer=disc_optimizer,
         num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
@@ -876,7 +805,7 @@ def main(args):
     else:
         initial_global_step = 0
 
-    progress_bar = tqdm(
+    progress_bar = tqdm.auto.tqdm(
         range(0, args.max_train_steps),
         initial=initial_global_step,
         desc="Steps",
@@ -899,9 +828,9 @@ def main(args):
                 with accelerator.accumulate(vae):
                     # reconstruction loss. Pixel level differences between input vs output
                     if args.rec_loss == "l2":
-                        rec_loss = F.mse_loss(reconstructions.float(), targets.float(), reduction="none")
+                        rec_loss = torch.nn.functional.mse_loss(reconstructions.float(), targets.float(), reduction="none")
                     elif args.rec_loss == "l1":
-                        rec_loss = F.l1_loss(reconstructions.float(), targets.float(), reduction="none")
+                        rec_loss = torch.nn.functional.l1_loss(reconstructions.float(), targets.float(), reduction="none")
                     else:
                         raise ValueError(f"Invalid reconstruction loss type: {args.rec_loss}")
                     # perceptual loss. The high level feature mean squared error loss
@@ -950,7 +879,7 @@ def main(args):
                 with accelerator.accumulate(discriminator):
                     logits_real = discriminator(targets)
                     logits_fake = discriminator(reconstructions)
-                    disc_loss = hinge_d_loss if args.disc_loss == "hinge" else vanilla_d_loss
+                    disc_loss = taming.modules.losses.vqperceptual.hinge_d_loss if args.disc_loss == "hinge" else taming.modules.losses.vqperceptual.vanilla_d_loss
                     disc_factor = args.disc_factor if global_step >= args.disc_start else 0.0
                     d_loss = disc_factor * disc_loss(logits_real, logits_fake)
                     logs = {
@@ -1038,20 +967,6 @@ def main(args):
             step=global_step,
             is_final_validation=True,
         )
-
-        if args.push_to_hub:
-            save_model_card(
-                repo_id,
-                image_logs=image_logs,
-                base_model=args.pretrained_model_name_or_path,
-                repo_folder=args.output_dir,
-            )
-            upload_folder(
-                repo_id=repo_id,
-                folder_path=args.output_dir,
-                commit_message="End of training",
-                ignore_patterns=["step_*", "epoch_*"],
-            )
 
     accelerator.end_training()
 
