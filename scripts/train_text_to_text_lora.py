@@ -122,7 +122,7 @@ def preprocess_captions(examples: dict, tokenizer: callable) -> list:
 
 # PREPROCESSING ################################################################
 
-def preprocess(examples: dict, transforms: callable, tokenizer: callable, encoder: callable=rgb_utf, height: int=-1, width: int=-1):
+def preprocess(examples: dict, transforms: callable, tokenizer: callable, encoder: callable=mlable.text.rgb_utf, height: int=-1, width: int=-1):
     # use UTF-32 encoding to interpret text as RGB data
     __images = preprocess_images(examples=examples, height=height, width=width, encoder=encoder)
     # specify both the ASCII art content and its style
@@ -282,7 +282,7 @@ def main():
         preprocess,
         transforms=train_transforms,
         tokenizer=tokenizer,
-        encoder=rgb_utf,
+        encoder=mlable.text.rgb_utf,
         height=-1,
         width=-1)
 
