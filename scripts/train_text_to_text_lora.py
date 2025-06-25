@@ -271,8 +271,8 @@ def main():
 
     # image transformations
     train_transforms = torchvision.transforms.Compose([
-            torchvision.transforms.Resize(args.resolution, interpolation=interpolation),  # Use dynamic interpolation method
-            torchvision.transforms.CenterCrop(args.resolution) if args.center_crop else torchvision.transforms.RandomCrop(args.resolution),
+            torchvision.transforms.Resize(args.image_resolution, interpolation=interpolation),  # Use dynamic interpolation method
+            torchvision.transforms.CenterCrop(args.image_resolution) if args.center_crop else torchvision.transforms.RandomCrop(args.image_resolution),
             torchvision.transforms.RandomHorizontalFlip() if args.random_flip else torchvision.transforms.Lambda(lambda x: x),
             torchvision.transforms.ToTensor(),
             torchvision.transforms.Normalize([0.5], [0.5]),])
