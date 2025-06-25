@@ -1,18 +1,3 @@
-#!/usr/bin/env python
-# coding=utf-8
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-
 import argparse
 import contextlib
 import gc
@@ -45,6 +30,10 @@ import diffusers.optimization
 import diffusers.training_utils
 import diffusers.utils.torch_utils
 
+import mlable.meta
+
+# VALIDATION ###################################################################
+
 logger = accelerate.logging.get_logger(__name__)
 
 @torch.no_grad()
@@ -61,14 +50,14 @@ def log_validation(vae, args, accelerator, weight_dtype, step, is_final_validati
 
     __transforms = torchvision.transforms.Compose(
         [
-            torchvision.transforms.Resize(args.resolution, interpolation=torchvision.transforms.InterpolationMode.BILINEAR),
-            torchvision.transforms.CenterCrop(args.resolution),
+            torchvision.transforms.Resize(args.image_resolution, interpolation=torchvision.transforms.InterpolationMode.BILINEAR),
+            torchvision.transforms.CenterCrop(args.image_resolution),
             torchvision.transforms.ToTensor(),
             torchvision.transforms.Normalize([0.5], [0.5]),
         ]
     )
 
-    for i, validation_image in enumerate(args.validation_image):
+    for i, validation_image in enumerate(args.validation_images):
         validation_image = pillow.Image.open(validation_image).convert("RGB")
         targets = __transforms(validation_image).to(accelerator.device, weight_dtype)
         targets = targets.unsqueeze(0)
@@ -93,351 +82,11 @@ def log_validation(vae, args, accelerator, weight_dtype, step, is_final_validati
 
 # MODEL ########################################################################
 
-def unwrap_model(model):
-    model = accelerator.unwrap_model(model)
-    model = model._orig_mod if diffusers.utils.torch_utils.is_compiled_module(model) else model
-    return model
+def unwrap_model(accelerator, model):
+    __model = accelerator.unwrap_model(model)
+    return __model._orig_mod if diffusers.utils.torch_utils.is_compiled_module(__model) else __model
 
-def parse_args(input_args=None):
-    parser = argparse.ArgumentParser(description="Simple example of a AutoencoderKL training script.")
-    parser.add_argument(
-        "--pretrained_model_name_or_path",
-        type=str,
-        default=None,
-        help="Path to pretrained model or model identifier from huggingface.co/models.",
-    )
-    parser.add_argument(
-        "--model_config_name_or_path",
-        type=str,
-        default=None,
-        help="The config of the VAE model to train, leave as None to use standard VAE model configuration.",
-    )
-    parser.add_argument(
-        "--revision",
-        type=str,
-        default=None,
-        required=False,
-        help="Revision of pretrained model identifier from huggingface.co/models.",
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default="autoencoderkl-model",
-        help="The output directory where the model predictions and checkpoints will be written.",
-    )
-    parser.add_argument(
-        "--cache_dir",
-        type=str,
-        default=None,
-        help="The directory where the downloaded models and datasets will be stored.",
-    )
-    parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
-    parser.add_argument(
-        "--resolution",
-        type=int,
-        default=512,
-        help=(
-            "The resolution for input images, all the images in the train/validation dataset will be resized to this"
-            " resolution"
-        ),
-    )
-    parser.add_argument(
-        "--train_batch_size", type=int, default=4, help="Batch size (per device) for the training dataloader."
-    )
-    parser.add_argument("--num_train_epochs", type=int, default=1)
-    parser.add_argument(
-        "--max_train_steps",
-        type=int,
-        default=None,
-        help="Total number of training steps to perform.  If provided, overrides num_train_epochs.",
-    )
-    parser.add_argument(
-        "--checkpointing_steps",
-        type=int,
-        default=500,
-        help=(
-            "Save a checkpoint of the training state every X updates. Checkpoints can be used for resuming training via `--resume_from_checkpoint`. "
-            "In the case that the checkpoint is better than the final trained model, the checkpoint can also be used for inference."
-            "Using a checkpoint for inference requires separate loading of the original pipeline and the individual checkpointed model components."
-            "See https://huggingface.co/docs/diffusers/main/en/training/dreambooth#performing-inference-using-a-saved-checkpoint for step by step"
-            "instructions."
-        ),
-    )
-    parser.add_argument(
-        "--checkpoints_total_limit",
-        type=int,
-        default=None,
-        help=("Max number of checkpoints to store."),
-    )
-    parser.add_argument(
-        "--resume_from_checkpoint",
-        type=str,
-        default=None,
-        help=(
-            "Whether training should be resumed from a previous checkpoint. Use a path saved by"
-            ' `--checkpointing_steps`, or `"latest"` to automatically select the last available checkpoint.'
-        ),
-    )
-    parser.add_argument(
-        "--gradient_accumulation_steps",
-        type=int,
-        default=1,
-        help="Number of updates steps to accumulate before performing a backward/update pass.",
-    )
-    parser.add_argument(
-        "--gradient_checkpointing",
-        action="store_true",
-        help="Whether or not to use gradient checkpointing to save memory at the expense of slower backward pass.",
-    )
-    parser.add_argument(
-        "--learning_rate",
-        type=float,
-        default=4.5e-6,
-        help="Initial learning rate (after the potential warmup period) to use.",
-    )
-    parser.add_argument(
-        "--disc_learning_rate",
-        type=float,
-        default=4.5e-6,
-        help="Initial learning rate (after the potential warmup period) to use.",
-    )
-    parser.add_argument(
-        "--scale_lr",
-        action="store_true",
-        default=False,
-        help="Scale the learning rate by the number of GPUs, gradient accumulation steps, and batch size.",
-    )
-    parser.add_argument(
-        "--lr_scheduler",
-        type=str,
-        default="constant",
-        help=(
-            'The scheduler type to use. Choose between ["linear", "cosine", "cosine_with_restarts", "polynomial",'
-            ' "constant", "constant_with_warmup"]'
-        ),
-    )
-    parser.add_argument(
-        "--disc_lr_scheduler",
-        type=str,
-        default="constant",
-        help=(
-            'The scheduler type to use. Choose between ["linear", "cosine", "cosine_with_restarts", "polynomial",'
-            ' "constant", "constant_with_warmup"]'
-        ),
-    )
-    parser.add_argument(
-        "--lr_warmup_steps", type=int, default=500, help="Number of steps for the warmup in the lr scheduler."
-    )
-    parser.add_argument(
-        "--lr_num_cycles",
-        type=int,
-        default=1,
-        help="Number of hard resets of the lr in cosine_with_restarts scheduler.",
-    )
-    parser.add_argument("--lr_power", type=float, default=1.0, help="Power factor of the polynomial scheduler.")
-    parser.add_argument(
-        "--use_8bit_adam", action="store_true", help="Whether or not to use 8-bit Adam from bitsandbytes."
-    )
-    parser.add_argument("--use_ema", action="store_true", help="Whether to use EMA model.")
-    parser.add_argument(
-        "--dataloader_num_workers",
-        type=int,
-        default=0,
-        help=(
-            "Number of subprocesses to use for data loading. 0 means that the data will be loaded in the main process."
-        ),
-    )
-    parser.add_argument("--adam_beta1", type=float, default=0.9, help="The beta1 parameter for the Adam optimizer.")
-    parser.add_argument("--adam_beta2", type=float, default=0.999, help="The beta2 parameter for the Adam optimizer.")
-    parser.add_argument("--adam_weight_decay", type=float, default=1e-2, help="Weight decay to use.")
-    parser.add_argument("--adam_epsilon", type=float, default=1e-08, help="Epsilon value for the Adam optimizer")
-    parser.add_argument("--max_grad_norm", default=1.0, type=float, help="Max gradient norm.")
-    parser.add_argument("--hub_token", type=str, default=None, help="The token to use to push to the Model Hub.")
-    parser.add_argument(
-        "--hub_model_id",
-        type=str,
-        default=None,
-        help="The name of the repository to keep in sync with the local `output_dir`.",
-    )
-    parser.add_argument(
-        "--logging_dir",
-        type=str,
-        default="logs",
-        help=(
-            "[TensorBoard](https://www.tensorflow.org/tensorboard) log directory. Will default to"
-            " *output_dir/runs/**CURRENT_DATETIME_HOSTNAME***."
-        ),
-    )
-    parser.add_argument(
-        "--allow_tf32",
-        action="store_true",
-        help=(
-            "Whether or not to allow TF32 on Ampere GPUs. Can be used to speed up training. For more information, see"
-            " https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices"
-        ),
-    )
-    parser.add_argument(
-        "--report_to",
-        type=str,
-        default="tensorboard",
-        help=(
-            'The integration to report the results and logs to. Supported platforms are `"tensorboard"`'
-            ' (default), `"wandb"` and `"comet_ml"`. Use `"all"` to report to all integrations.'
-        ),
-    )
-    parser.add_argument(
-        "--mixed_precision",
-        type=str,
-        default=None,
-        choices=["no", "fp16", "bf16"],
-        help=(
-            "Whether to use mixed precision. Choose between fp16 and bf16 (bfloat16). Bf16 requires PyTorch >="
-            " 1.10.and an Nvidia Ampere GPU.  Default to the value of accelerate config of the current system or the"
-            " flag passed with the `accelerate.launch` command. Use this argument to override the accelerate config."
-        ),
-    )
-    parser.add_argument(
-        "--enable_xformers_memory_efficient_attention", action="store_true", help="Whether or not to use xformers."
-    )
-    parser.add_argument(
-        "--set_grads_to_none",
-        action="store_true",
-        help=(
-            "Save more memory by using setting grads to None instead of zero. Be aware, that this changes certain"
-            " behaviors, so disable this argument if it causes any problems. More info:"
-            " https://pytorch.org/docs/stable/generated/torch.optim.Optimizer.zero_grad.html"
-        ),
-    )
-    parser.add_argument(
-        "--dataset_name",
-        type=str,
-        default=None,
-        help=(
-            "The name of the Dataset (from the HuggingFace hub) to train on (could be your own, possibly private,"
-            " dataset). It can also be a path pointing to a local copy of a dataset in your filesystem,"
-            " or to a folder containing files that 🤗 Datasets can understand."
-        ),
-    )
-    parser.add_argument(
-        "--dataset_config_name",
-        type=str,
-        default=None,
-        help="The config of the Dataset, leave as None if there's only one config.",
-    )
-    parser.add_argument(
-        "--train_data_dir",
-        type=str,
-        default=None,
-        help=(
-            "A folder containing the training data. Folder contents must follow the structure described in"
-            " https://huggingface.co/docs/datasets/image_dataset#imagefolder. In particular, a `metadata.jsonl` file"
-            " must exist to provide the captions for the images. Ignored if `dataset_name` is specified."
-        ),
-    )
-    parser.add_argument(
-        "--image_column", type=str, default="image", help="The column of the dataset containing the target image."
-    )
-    parser.add_argument(
-        "--max_train_samples",
-        type=int,
-        default=None,
-        help=(
-            "For debugging purposes or quicker training, truncate the number of training examples to this "
-            "value if set."
-        ),
-    )
-    parser.add_argument(
-        "--validation_image",
-        type=str,
-        default=None,
-        nargs="+",
-        help="A set of paths to the image be evaluated every `--validation_steps` and logged to `--report_to`.",
-    )
-    parser.add_argument(
-        "--validation_steps",
-        type=int,
-        default=100,
-        help=(
-            "Run validation every X steps. Validation consists of running the prompt"
-            " `args.validation_prompt` multiple times: `args.num_validation_images`"
-            " and logging the images."
-        ),
-    )
-    parser.add_argument(
-        "--tracker_project_name",
-        type=str,
-        default="train_autoencoderkl",
-        help=(
-            "The `project_name` argument passed to Accelerator.init_trackers for"
-            " more information see https://huggingface.co/docs/accelerate/v0.17.0/en/package_reference/accelerator#accelerate.Accelerator"
-        ),
-    )
-    parser.add_argument(
-        "--rec_loss",
-        type=str,
-        default="l2",
-        help="The loss function for VAE reconstruction loss.",
-    )
-    parser.add_argument(
-        "--kl_scale",
-        type=float,
-        default=1e-6,
-        help="Scaling factor for the Kullback-Leibler divergence penalty term.",
-    )
-    parser.add_argument(
-        "--perceptual_scale",
-        type=float,
-        default=0.5,
-        help="Scaling factor for the LPIPS metric",
-    )
-    parser.add_argument(
-        "--disc_start",
-        type=int,
-        default=50001,
-        help="Start for the discriminator",
-    )
-    parser.add_argument(
-        "--disc_factor",
-        type=float,
-        default=1.0,
-        help="Scaling factor for the discriminator",
-    )
-    parser.add_argument(
-        "--disc_scale",
-        type=float,
-        default=1.0,
-        help="Scaling factor for the discriminator",
-    )
-    parser.add_argument(
-        "--disc_loss",
-        type=str,
-        default="hinge",
-        help="Loss function for the discriminator",
-    )
-    parser.add_argument(
-        "--decoder_only",
-        action="store_true",
-        help="Only train the VAE decoder.",
-    )
-
-    if input_args is not None:
-        args = parser.parse_args(input_args)
-    else:
-        args = parser.parse_args()
-
-    if args.pretrained_model_name_or_path is not None and args.model_config_name_or_path is not None:
-        raise ValueError("Cannot specify both `--pretrained_model_name_or_path` and `--model_config_name_or_path`")
-
-    if args.dataset_name is None and args.train_data_dir is None:
-        raise ValueError("Specify either `--dataset_name` or `--train_data_dir`")
-
-    if args.resolution % 8 != 0:
-        raise ValueError(
-            "`--resolution` must be divisible by 8 for consistently sized encoded images between the VAE and the diffusion model."
-        )
-
-    return args
-
+# DATASET ######################################################################
 
 def make_train_dataset(args, accelerator):
     # Get the datasets: you can either provide your own training and evaluation files (see below)
@@ -449,14 +98,14 @@ def make_train_dataset(args, accelerator):
         # Downloading and loading a dataset from the hub.
         dataset = datasets.load_dataset(
             args.dataset_name,
-            args.dataset_config_name,
+            args.dataset_config,
             cache_dir=args.cache_dir,
-            data_dir=args.train_data_dir,
+            data_dir=args.dataset_dir,
         )
     else:
         data_files = {}
-        if args.train_data_dir is not None:
-            data_files["train"] = os.path.join(args.train_data_dir, "**")
+        if args.dataset_dir is not None:
+            data_files["train"] = os.path.join(args.dataset_dir, "**")
         dataset = datasets.load_dataset(
             "imagefolder",
             data_files=data_files,
@@ -482,8 +131,8 @@ def make_train_dataset(args, accelerator):
 
     __transforms = torchvision.transforms.Compose(
         [
-            torchvision.transforms.Resize(args.resolution, interpolation=torchvision.transforms.InterpolationMode.BILINEAR),
-            torchvision.transforms.CenterCrop(args.resolution),
+            torchvision.transforms.Resize(args.image_resolution, interpolation=torchvision.transforms.InterpolationMode.BILINEAR),
+            torchvision.transforms.CenterCrop(args.image_resolution),
             torchvision.transforms.ToTensor(),
             torchvision.transforms.Normalize([0.5], [0.5]),
         ]
@@ -498,8 +147,8 @@ def make_train_dataset(args, accelerator):
         return examples
 
     with accelerator.main_process_first():
-        if args.max_train_samples is not None:
-            dataset["train"] = dataset["train"].shuffle(seed=args.seed).select(range(args.max_train_samples))
+        if args.max_samples is not None:
+            dataset["train"] = dataset["train"].shuffle(seed=args.random_seed).select(range(args.max_samples))
         # Set the training transforms
         train_dataset = dataset["train"].with_transform(preprocess_train)
 
@@ -513,21 +162,19 @@ def collate_fn(examples):
     return {"pixel_values": pixel_values}
 
 
-def main(args):
-    if args.report_to == "wandb" and args.hub_token is not None:
-        raise ValueError(
-            "You cannot use both --report_to=wandb and --hub_token due to a security risk of exposing your token."
-            " Please use `huggingface-cli login` to authenticate with the Hub."
-        )
+def main():
+    args = mlable.meta.parse_args(
+        definitions=mlable.meta.VAE_ARGS,
+        description='')
 
-    logging_dir = pathlib.Path(args.output_dir, args.logging_dir)
-
-    accelerator_project_config = accelerate.utils.ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
+    accelerator_project_config = accelerate.utils.ProjectConfiguration(
+        project_dir=args.output_dir,
+        logging_dir=args.logging_dir)
 
     accelerator = accelerate.Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
-        log_with=args.report_to,
+        log_with='tensorboard',
         project_config=accelerator_project_config,
     )
 
@@ -549,9 +196,8 @@ def main(args):
         transformers.utils.logging.set_verbosity_error()
         diffusers.utils.logging.set_verbosity_error()
 
-    # If passed along, set the training seed now.
-    if args.seed is not None:
-        accelerate.utils.set_seed(args.seed)
+    # set the training seed now.
+    accelerate.utils.set_seed(args.random_seed)
 
     # Handle the repository creation
     if accelerator.is_main_process:
@@ -559,13 +205,13 @@ def main(args):
             os.makedirs(args.output_dir, exist_ok=True)
 
     # Load AutoencoderKL
-    if args.pretrained_model_name_or_path is None and args.model_config_name_or_path is None:
+    if args.model_name is None and args.model_config is None:
         config = diffusers.AutoencoderKL.load_config("stabilityai/sd-vae-ft-mse")
         vae = diffusers.AutoencoderKL.from_config(config)
-    elif args.pretrained_model_name_or_path is not None:
-        vae = diffusers.AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, revision=args.revision)
+    elif args.model_name is not None:
+        vae = diffusers.AutoencoderKL.from_pretrained(args.model_name, revision=args.model_revision)
     else:
-        config = diffusers.AutoencoderKL.load_config(args.model_config_name_or_path)
+        config = diffusers.AutoencoderKL.load_config(args.model_config)
         vae = diffusers.AutoencoderKL.from_config(config)
     if args.use_ema:
         ema_vae = diffusers.training_utils.EMAModel(vae.parameters(), model_cls=diffusers.AutoencoderKL, model_config=vae.config)
@@ -625,17 +271,13 @@ def main(args):
         accelerator.register_load_state_pre_hook(load_model_hook)
 
     vae.requires_grad_(True)
-    if args.decoder_only:
-        vae.encoder.requires_grad_(False)
-        if getattr(vae, "quant_conv", None):
-            vae.quant_conv.requires_grad_(False)
     vae.train()
     discriminator.requires_grad_(True)
     discriminator.train()
 
-    if args.enable_xformers_memory_efficient_attention:
+    if args.enable_xformers:
         import xformers
-        vae.enable_xformers_memory_efficient_attention()
+        vae.enable_xformers()
 
     if args.gradient_checkpointing:
         vae.enable_gradient_checkpointing()
@@ -656,7 +298,7 @@ def main(args):
 
     if args.scale_lr:
         args.learning_rate = (
-            args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes
+            args.learning_rate * args.gradient_accumulation_steps * args.batch_dim * accelerator.num_processes
         )
 
     # Use 8-bit Adam for lower memory usage or to fine-tune the model in 16GB GPUs
@@ -683,7 +325,7 @@ def main(args):
     )
     disc_optimizer = optimizer_class(
         disc_params_to_optimize,
-        lr=args.disc_learning_rate,
+        lr=args.learning_rate,
         betas=(args.adam_beta1, args.adam_beta2),
         weight_decay=args.adam_weight_decay,
         eps=args.adam_epsilon,
@@ -695,31 +337,31 @@ def main(args):
         train_dataset,
         shuffle=True,
         collate_fn=collate_fn,
-        batch_size=args.train_batch_size,
+        batch_size=args.batch_dim,
         num_workers=args.dataloader_num_workers,
     )
 
     # Scheduler and math around the number of training steps.
-    overrode_max_train_steps = False
+    overrode_step_num = False
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
-    if args.max_train_steps is None:
-        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
-        overrode_max_train_steps = True
+    if args.step_num is None:
+        args.step_num = args.epoch_num * num_update_steps_per_epoch
+        overrode_step_num = True
 
     lr_scheduler = diffusers.optimization.get_scheduler(
         args.lr_scheduler,
         optimizer=optimizer,
         num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
-        num_training_steps=args.max_train_steps * accelerator.num_processes,
-        num_cycles=args.lr_num_cycles,
+        num_training_steps=args.step_num * accelerator.num_processes,
+        num_cycles=args.lr_cycle_num,
         power=args.lr_power,
     )
     disc_lr_scheduler = diffusers.optimization.get_scheduler(
-        args.disc_lr_scheduler,
+        args.lr_scheduler,
         optimizer=disc_optimizer,
         num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
-        num_training_steps=args.max_train_steps * accelerator.num_processes,
-        num_cycles=args.lr_num_cycles,
+        num_training_steps=args.step_num * accelerator.num_processes,
+        num_cycles=args.lr_cycle_num,
         power=args.lr_power,
     )
 
@@ -753,35 +395,35 @@ def main(args):
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
-    if overrode_max_train_steps:
-        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
+    if overrode_step_num:
+        args.step_num = args.epoch_num * num_update_steps_per_epoch
     # Afterwards we recalculate our number of training epochs
-    args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
+    args.epoch_num = math.ceil(args.step_num / num_update_steps_per_epoch)
 
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
     if accelerator.is_main_process:
         tracker_config = dict(vars(args))
-        accelerator.init_trackers(args.tracker_project_name, config=tracker_config)
+        accelerator.init_trackers(args.project_name, config=tracker_config)
 
     # Train!
-    total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
+    total_batch_size = args.batch_dim * accelerator.num_processes * args.gradient_accumulation_steps
 
     logger.info("***** Running training *****")
     logger.info(f"  Num examples = {len(train_dataset)}")
     logger.info(f"  Num batches each epoch = {len(train_dataloader)}")
-    logger.info(f"  Num Epochs = {args.num_train_epochs}")
-    logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
+    logger.info(f"  Num Epochs = {args.epoch_num}")
+    logger.info(f"  Instantaneous batch size per device = {args.batch_dim}")
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
-    logger.info(f"  Total optimization steps = {args.max_train_steps}")
+    logger.info(f"  Total optimization steps = {args.step_num}")
     global_step = 0
     first_epoch = 0
 
     # Potentially load in the weights and states from a previous save
-    if args.resume_from_checkpoint:
-        if args.resume_from_checkpoint != "latest":
-            path = os.path.basename(args.resume_from_checkpoint)
+    if args.resume_from:
+        if args.resume_from != "latest":
+            path = os.path.basename(args.resume_from)
         else:
             # Get the most recent checkpoint
             dirs = os.listdir(args.output_dir)
@@ -791,9 +433,9 @@ def main(args):
 
         if path is None:
             accelerator.print(
-                f"Checkpoint '{args.resume_from_checkpoint}' does not exist. Starting a new training run."
+                f"Checkpoint '{args.resume_from}' does not exist. Starting a new training run."
             )
-            args.resume_from_checkpoint = None
+            args.resume_from = None
             initial_global_step = 0
         else:
             accelerator.print(f"Resuming from checkpoint {path}")
@@ -806,7 +448,7 @@ def main(args):
         initial_global_step = 0
 
     progress_bar = tqdm.auto.tqdm(
-        range(0, args.max_train_steps),
+        range(0, args.step_num),
         initial=initial_global_step,
         desc="Steps",
         # Only show the progress bar once on each machine.
@@ -814,7 +456,7 @@ def main(args):
     )
 
     image_logs = None
-    for epoch in range(first_epoch, args.num_train_epochs):
+    for epoch in range(first_epoch, args.epoch_num):
         vae.train()
         discriminator.train()
         for step, batch in enumerate(train_dataloader):
@@ -837,7 +479,7 @@ def main(args):
                     with torch.no_grad():
                         p_loss = perceptual_loss(reconstructions, targets)
 
-                    rec_loss = rec_loss + args.perceptual_scale * p_loss
+                    rec_loss = rec_loss + args.lpips_rate * p_loss
                     nll_loss = rec_loss
                     nll_loss = torch.sum(nll_loss) / nll_loss.shape[0]
 
@@ -854,7 +496,7 @@ def main(args):
                     disc_weight = disc_weight * args.disc_scale
                     disc_factor = args.disc_factor if global_step >= args.disc_start else 0.0
 
-                    loss = nll_loss + args.kl_scale * kl_loss + disc_weight * disc_factor * g_loss
+                    loss = nll_loss + args.kl_rate * kl_loss + disc_weight * disc_factor * g_loss
 
                     logs = {
                         "loss": loss.detach().mean().item(),
@@ -874,7 +516,7 @@ def main(args):
                         accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
                     optimizer.step()
                     lr_scheduler.step()
-                    optimizer.zero_grad(set_to_none=args.set_grads_to_none)
+                    optimizer.zero_grad(set_to_none=False)
             else:
                 with accelerator.accumulate(discriminator):
                     logits_real = discriminator(targets)
@@ -894,7 +536,7 @@ def main(args):
                         accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
                     disc_optimizer.step()
                     disc_lr_scheduler.step()
-                    disc_optimizer.zero_grad(set_to_none=args.set_grads_to_none)
+                    disc_optimizer.zero_grad(set_to_none=False)
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
                 progress_bar.update(1)
@@ -903,16 +545,16 @@ def main(args):
                     ema_vae.step(vae.parameters())
 
                 if accelerator.is_main_process:
-                    if global_step % args.checkpointing_steps == 0:
-                        # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
-                        if args.checkpoints_total_limit is not None:
+                    if global_step % args.checkpoint_steps == 0:
+                        # _before_ saving state, check if this save would set us over the `checkpoint_limit`
+                        if args.checkpoint_limit is not None:
                             checkpoints = os.listdir(args.output_dir)
                             checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
                             checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
 
-                            # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
-                            if len(checkpoints) >= args.checkpoints_total_limit:
-                                num_to_remove = len(checkpoints) - args.checkpoints_total_limit + 1
+                            # before we save the new checkpoint, we need to have at _most_ `checkpoint_limit - 1` checkpoints
+                            if len(checkpoints) >= args.checkpoint_limit:
+                                num_to_remove = len(checkpoints) - args.checkpoint_limit + 1
                                 removing_checkpoints = checkpoints[0:num_to_remove]
 
                                 logger.info(
@@ -945,7 +587,7 @@ def main(args):
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
 
-            if global_step >= args.max_train_steps:
+            if global_step >= args.step_num:
                 break
 
     # Create the pipeline using using the trained modules and save it.
@@ -970,7 +612,5 @@ def main(args):
 
     accelerator.end_training()
 
-
 if __name__ == "__main__":
-    args = parse_args()
-    main(args)
+    main()

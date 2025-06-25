@@ -36,6 +36,7 @@ import diffusers.utils.import_utils
 import diffusers.utils.torch_utils
 
 import densecurves.hilbert
+import mlable.meta
 
 logger = accelerate.logging.get_logger(__name__, log_level='INFO')
 
@@ -53,19 +54,19 @@ def log_validation(
     is_final_validation=False,
 ):
     logger.info(
-        f'Running validation... \n Generating {args.num_validation_images} images with prompt:'
-        f' {args.validation_prompt}.'
+        f'Running validation... \n Generating images for the prompts:'
+        f' {args.validation_prompts}.'
     )
     images = []
     pipeline = pipeline.to(accelerator.device)
     pipeline.set_progress_bar_config(disable=True)
     generator = torch.Generator(device=accelerator.device)
-    generator = generator.manual_seed(args.seed)
+    generator = generator.manual_seed(args.random_seed)
     autocast_ctx = torch.autocast(accelerator.device.type)
     # mixed precision
     with autocast_ctx:
-        for _ in range(args.num_validation_images):
-            images.append(pipeline(args.validation_prompt, num_inference_steps=30, generator=generator).images[0])
+        for __p in args.validation_prompts:
+            images.append(pipeline(__p, num_inference_steps=30, generator=generator).images[0])
     # save the images
     for tracker in accelerator.trackers:
         phase_name = 'test' if is_final_validation else 'validation'
@@ -192,81 +193,12 @@ def collate_fn(examples: iter):
 
 # POSTPROCESSING ###############################################################
 
-# ARGS #########################################################################
-
-def parse_args():
-    parser = argparse.ArgumentParser(description='Simple example of a training script.')
-    # random config
-    parser.add_argument('--seed', type=int, default=random.randint(0, 2 ** 32), help='A seed for reproducible training.')
-    # model config
-    parser.add_argument('--model_name', type=str, default='stable-diffusion-v1-5/stable-diffusion-v1-5', required=False, help='Path to pretrained model or model identifier from huggingface.co/models.')
-    parser.add_argument('--revision', type=str, default=None, required=False, help='Revision of pretrained model identifier from huggingface.co/models.')
-    parser.add_argument('--variant', type=str, default=None, required=False, help='Variant of the model files of the pretrained model identifier from huggingface.co/models, e.g. fp16')
-    parser.add_argument('--lora_rank', type=int, default=8, required=False, help='The dimension of the LoRA update matrices.')
-    # dataset config
-    parser.add_argument('--dataset_name', type=str, default='apehex/ascii-art-datacompdr-12m', required=False, help='The name of the Dataset (from the HuggingFace hub) to train on.')
-    parser.add_argument('--dataset_config', type=str, default='default', required=False, help='The config of the Dataset, leave as None if there\'s only one config.')
-    parser.add_argument('--dataset_split', type=str, default='train', required=False, help='The split of the Dataset.')
-    parser.add_argument('--dataset_dir', type=str, default=None, required=False, help='A folder containing the training data.')
-    parser.add_argument('--image_column', type=str, default='content', required=False, help='The column of the dataset containing an image.')
-    parser.add_argument('--caption_column', type=str, default='caption', required=False, help='The column of the dataset containing a caption or a list of captions.')
-    parser.add_argument('--max_samples', type=int, default=0, required=False, help='Truncate the number of training examples to this value if set.')
-    # preprocessing config
-    parser.add_argument('--resolution', type=int, default=512, required=False, help='The resolution for input images.')
-    parser.add_argument('--center_crop', default=False, required=False, action='store_true', help='Whether to center (instead of random) crop the input images to the resolution.')
-    parser.add_argument('--random_flip', default=False, required=False, action='store_true', help='whether to randomly flip images horizontally.')
-    parser.add_argument('--image_interpolation_mode', type=str, default='lanczos', choices=[__f.lower() for __f in dir(torchvision.transforms.InterpolationMode) if not __f.startswith('__') and not __f.endswith('__')], required=False, help='The image interpolation method to use for resizing images.')
-    # output config
-    parser.add_argument('--output_dir', type=str, default='lora-model', required=False, help='The output directory where the model predictions and checkpoints will be written.')
-    parser.add_argument('--cache_dir', type=str, default=None, required=False, help='The directory where the downloaded models and datasets will be stored.')
-    parser.add_argument('--logging_dir', type=str, default='logs', required=False, help='[TensorBoard](https://www.tensorflow.org/tensorboard) log directory.')
-    # checkpoint config
-    parser.add_argument('--resume_from', type=str, default='', required=False, help='Use a path saved by `--checkpoint_steps`, or `"latest"` to automatically select the last available checkpoint.')
-    parser.add_argument('--checkpoint_steps', type=int, default=256, required=False, help='Save a checkpoint of the training state every X updates, for resuming with `--resume_from`.')
-    parser.add_argument('--checkpoint_limit', type=int, default=0, required=False, help='Max number of checkpoints to store.')
-    # iteration config
-    parser.add_argument('--batch_dim', type=int, default=1, required=False, help='Batch size (per device) for the training dataloader.')
-    parser.add_argument('--epoch_num', type=int, default=32, required=False)
-    parser.add_argument('--step_num', type=int, default=0, required=False, help='Total number of training steps to perform; overrides epoch_num.')
-    # validation config
-    parser.add_argument('--validation_prompt', type=str, default='', required=False, help='A prompt that is sampled during training for inference.')
-    parser.add_argument('--num_validation_images', type=int, default=4, required=False, help='Number of images that should be generated during validation with `validation_prompt`.')
-    parser.add_argument('--validation_epochs', type=int, default=1, required=False, help='Run fine-tuning validation every X epochs.')
-    # gradient config
-    parser.add_argument('--gradient_accumulation_steps', type=int, default=1, required=False, help='Number of updates steps to accumulate before performing a backward/update pass.')
-    parser.add_argument('--gradient_checkpointing', default=False, required=False, action='store_true', help='Whether or not to use gradient checkpointing to save memory at the expense of slower backward pass.')
-    # learning-rate config
-    parser.add_argument('--learning_rate', type=float, default=1e-4, required=False, help='Initial learning rate (after the potential warmup period) to use.')
-    parser.add_argument('--scale_lr', default=False, required=False, action='store_true', help='Scale the learning rate by the number of GPUs, gradient accumulation steps, and batch size.')
-    parser.add_argument('--lr_scheduler', type=str, default='constant', required=False, help='The scheduler type to use, among ["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup"]')
-    parser.add_argument('--lr_warmup_steps', type=int, default=512, required=False, help='Number of steps for the warmup in the lr scheduler.')
-    # loss config
-    parser.add_argument('--snr_gamma', type=float, default=0.0, required=False, help='SNR weighting gamma to rebalance the loss; ecommended value is 5.0. https://arxiv.org/pdf/2303.09556')
-    # precision config
-    parser.add_argument('--mixed_precision', type=str, default='bf16', required=False, choices=['no', 'fp16', 'bf16'], help='Choose between fp16 and bf16 (bfloat16).')
-    parser.add_argument('--allow_tf32', default=False, required=False, action='store_true', help='Whether or not to allow TF32 on Ampere GPUs. Can be used to speed up training.')
-    parser.add_argument('--use_8bit_adam', default=False, required=False, action='store_true', help='Whether or not to use 8-bit Adam from bitsandbytes.')
-    # distribution config
-    parser.add_argument('--dataloader_num_workers', type=int, default=0, required=False, help='Number of subprocesses to use for data loading; 0 means that the data will be loaded in the main process.')
-    parser.add_argument('--local_rank', type=int, default=int(os.environ.get('LOCAL_RANK', -1)), required=False, help='For distributed training: local_rank')
-    # optimizer config
-    parser.add_argument('--adam_beta1', type=float, default=0.9, required=False, help='The beta1 parameter for the Adam optimizer.')
-    parser.add_argument('--adam_beta2', type=float, default=0.999, required=False, help='The beta2 parameter for the Adam optimizer.')
-    parser.add_argument('--adam_weight_decay', type=float, default=1e-2, required=False, help='Weight decay to use.')
-    parser.add_argument('--adam_epsilon', type=float, default=1e-08, required=False, help='Epsilon value for the Adam optimizer')
-    parser.add_argument('--max_grad_norm', type=float, default=1.0, required=False, help='Max gradient norm.')
-    # framework config
-    parser.add_argument('--enable_xformers', default=False, required=False, action='store_true', help='Whether or not to use xformers.')
-    # diffusion config
-    parser.add_argument('--prediction_type', type=str, default='epsilon', required=False, help='The prediction type, among "epsilon", "v_prediction" or `None`.')
-    parser.add_argument('--noise_offset', type=float, default=0.0, required=False, help='The scale of noise offset.')
-    # actually process the CLI inputs
-    return parser.parse_args()
-
 # MAIN #########################################################################
 
 def main():
-    args = parse_args()
+    args = mlable.meta.parse_args(
+        definitions=mlable.meta.DDPM_ARGS,
+        description='')
 
     accelerator_project_config = accelerate.utils.ProjectConfiguration(
         project_dir=args.output_dir,
@@ -290,7 +222,7 @@ def main():
     diffusers.utils.logging.set_verbosity_info()
 
     # set the training seed now
-    accelerate.utils.set_seed(args.seed)
+    accelerate.utils.set_seed(args.random_seed)
 
     # create the output directory
     os.makedirs(args.output_dir, exist_ok=True)
@@ -299,16 +231,16 @@ def main():
     # load scheduler, tokenizer and models
     noise_scheduler = diffusers.DDPMScheduler.from_pretrained(args.model_name, subfolder='scheduler')
     tokenizer = transformers.CLIPTokenizer.from_pretrained(
-        args.model_name, subfolder='tokenizer', revision=args.revision
+        args.model_name, subfolder='tokenizer', revision=args.model_revision
     )
     text_encoder = transformers.CLIPTextModel.from_pretrained(
-        args.model_name, subfolder='text_encoder', revision=args.revision
+        args.model_name, subfolder='text_encoder', revision=args.model_revision
     )
     vae = diffusers.AutoencoderKL.from_pretrained(
-        args.model_name, subfolder='vae', revision=args.revision, variant=args.variant
+        args.model_name, subfolder='vae', revision=args.model_revision, variant=args.model_variant
     )
     unet = diffusers.UNet2DConditionModel.from_pretrained(
-        args.model_name, subfolder='unet', revision=args.revision, variant=args.variant
+        args.model_name, subfolder='unet', revision=args.model_revision, variant=args.model_variant
     )
 
     # freeze parameters of models to save more memory
@@ -388,7 +320,7 @@ def main():
     caption_column = args.caption_column if (args.caption_column in column_names) else column_names[1]
 
     # Get the specified interpolation method from the args
-    interpolation = getattr(torchvision.transforms.InterpolationMode, args.image_interpolation_mode.upper(), 'lanczos')
+    interpolation = getattr(torchvision.transforms.InterpolationMode, args.interpolation_mode.upper(), 'lanczos')
 
     # image transformations
     train_transforms = torchvision.transforms.Compose([
@@ -409,7 +341,7 @@ def main():
 
     with accelerator.main_process_first():
         if args.max_samples:
-            dataset = dataset.shuffle(seed=args.seed).select(range(args.max_samples))
+            dataset = dataset.shuffle(seed=args.random_seed).select(range(args.max_samples))
         # Set the training transforms
         train_dataset = dataset.with_transform(__preprocess)
 
@@ -462,7 +394,7 @@ def main():
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
     if accelerator.is_main_process:
-        accelerator.init_trackers('text2image-fine-tune', config=vars(args))
+        accelerator.init_trackers(args.project_name, config=vars(args))
 
     # Train!
     total_batch_size = args.batch_dim * accelerator.num_processes * args.gradient_accumulation_steps
@@ -640,13 +572,13 @@ def main():
                 break
 
         if accelerator.is_main_process:
-            if args.validation_prompt and epoch % args.validation_epochs == 0:
+            if args.validation_prompts and epoch % args.validation_epochs == 0:
                 # create pipeline
                 pipeline = diffusers.DiffusionPipeline.from_pretrained(
                     args.model_name,
                     unet=unwrap_model(accelerator, unet),
-                    revision=args.revision,
-                    variant=args.variant,
+                    revision=args.model_revision,
+                    variant=args.model_variant,
                     torch_dtype=weight_dtype,
                 )
                 images = log_validation(pipeline, args, accelerator, epoch)
@@ -669,11 +601,11 @@ def main():
 
         # Final inference
         # Load previous pipeline
-        if args.validation_prompt:
+        if args.validation_prompts:
             pipeline = diffusers.DiffusionPipeline.from_pretrained(
                 args.model_name,
-                revision=args.revision,
-                variant=args.variant,
+                revision=args.model_revision,
+                variant=args.model_variant,
                 torch_dtype=weight_dtype,
             )
 
