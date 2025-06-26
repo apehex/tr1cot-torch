@@ -377,9 +377,10 @@ def main():
 
     # init the trackers
     if accelerator.is_main_process:
-        tracker_config = dict(vars(args))
-        tracker_config.pop("validation_prompts")
-        accelerator.init_trackers(args.project_name, tracker_config)
+        __config = dict(vars(args))
+        __config.pop('validation_prompts')
+        __config.pop('validation_images')
+        accelerator.init_trackers(args.project_name, __config)
 
     # train!
     total_batch_size = args.batch_dim * accelerator.num_processes * args.gradient_accumulation_steps

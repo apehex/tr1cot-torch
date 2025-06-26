@@ -403,8 +403,10 @@ def main():
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
     if accelerator.is_main_process:
-        tracker_config = dict(vars(args))
-        accelerator.init_trackers(args.project_name, config=tracker_config)
+        __config = dict(vars(args))
+        __config.pop('validation_prompts')
+        __config.pop('validation_images')
+        accelerator.init_trackers(args.project_name, __config)
 
     # Train!
     total_batch_size = args.batch_dim * accelerator.num_processes * args.gradient_accumulation_steps
