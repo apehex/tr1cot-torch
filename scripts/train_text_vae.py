@@ -32,9 +32,13 @@ import diffusers.utils.torch_utils
 
 import mlable.meta
 
+# CONSTANTS ####################################################################
+
+DTYPES = {'fp16': torch.float16, 'bf16': torch.bfloat16}
+
 # VALIDATION ###################################################################
 
-logger = accelerate.logging.get_logger(__name__)
+logger = accelerate.logging.get_logger(__name__, log_level='INFO')
 
 @torch.no_grad()
 def log_validation(vae, args, accelerator, weight_dtype, step, is_final_validation=False):
@@ -288,8 +292,8 @@ def main():
         " doing mixed precision training, copy of the weights should still be float32."
     )
 
-    if unwrap_model(vae).dtype != torch.float32:
-        raise ValueError(f"VAE loaded as datatype {unwrap_model(vae).dtype}. {low_precision_error_string}")
+    if unwrap_model(accelerator, vae).dtype != torch.float32:
+        raise ValueError(f"VAE loaded as datatype {unwrap_model(accelerator, vae).dtype}. {low_precision_error_string}")
 
     # Enable TF32 for faster training on Ampere GPUs,
     # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
@@ -378,13 +382,8 @@ def main():
         vae, discriminator, optimizer, disc_optimizer, train_dataloader, lr_scheduler, disc_lr_scheduler
     )
 
-    # For mixed precision training we cast the text_encoder and vae weights to half-precision
-    # as these models are only used for inference, keeping weights in full precision is not required.
-    weight_dtype = torch.float32
-    if accelerator.mixed_precision == "fp16":
-        weight_dtype = torch.float16
-    elif accelerator.mixed_precision == "bf16":
-        weight_dtype = torch.bfloat16
+    # cast all non-trainable weights (vae, non-lora text_encoder and non-lora unet) to half-precision
+    weight_dtype = DTYPES.get(accelerator.mixed_precision, torch.float32)
 
     # Move VAE, perceptual loss and discriminator to device and cast to weight_dtype
     vae.to(accelerator.device, dtype=weight_dtype)
